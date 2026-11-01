@@ -10,4 +10,5 @@ wheels/
 .venv
 .vscode/
 tmp/
+runs/
 data
