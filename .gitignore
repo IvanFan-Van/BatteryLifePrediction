@@ -12,3 +12,5 @@ wheels/
 tmp/
 runs/
 data
+papers/
+.cortexkit/magic-context/
