@@ -218,7 +218,7 @@ pueue follow <task_id>
 `pueue follow` 会持续占用当前终端，可以通过 `Ctrl+C` 退出跟踪。正常情况下不会终止后台训练任务。
 
 更多 Pueue 命令参考：
-[本地 Pueue 使用指南](src/utils/pueue_manual.md)
+[本地 Pueue 使用指南](docs/pueue_manual.md)
 
 
 所有实验使用的原始数据均存放于项目的 `data/raw` 目录。

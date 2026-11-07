@@ -8,6 +8,7 @@ trajectories from sampled charge segments and cell metadata.
 | configs/ | Flat YAML files for smoke runs and full-dataset studies |
 | data/raw/ | Original datasets, including BatteryLife Tongji pickles in Tongji/ |
 | data/processed/ | Prepared datasets, including tongji_v1/ |
+| docs/ | Pueue and Tongji workflow guides |
 | notebooks/ | Jupyter notebooks for inspecting processed cells and batches |
 | outputs/ | Experiment reports, logs, predictions, and checkpoints |
 | scripts/ | Data preparation and experiment queue entry points |
@@ -36,6 +37,7 @@ itself to `data/raw` once the destination is free. Its target directory
 stays in place. If the link uses a relative target, recreate it relative to
 `data/` and verify that it resolves to the original dataset directory.
 
-[Data contract](src/data/tongji_data.md) ·
-[Smoke training](src/core/tongji_attention_smoke.md) ·
-[Full Tongji comparison](src/core/tongji_full_ablation.md)
+[Pueue guide](docs/pueue_manual.md) ·
+[Data contract](docs/tongji_data.md) ·
+[Smoke training](docs/tongji_attention_smoke.md) ·
+[Full Tongji comparison](docs/tongji_full_ablation.md)
