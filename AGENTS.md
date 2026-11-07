@@ -94,11 +94,13 @@ Commit 应当尽量保持原子性。
 - 不在实验运行期间修改该实验实际读取的配置快照。
 
 
-当前服务器有四张 NVIDIA RTX 4090。
+farady（Linux）服务器有四张 NVIDIA RTX 4090。以下 GPU 编号限制仅适用于 farady。
 
-**本项目只允许使用物理 GPU 2 和 GPU 3（最后两张）。**
+**在 farady 上只允许使用物理 GPU 2 和 GPU 3（最后两张）。**
 
-严格禁止使用物理 GPU 0 和 GPU 1，除非用户明确修改此规则。
+farady 上严格禁止使用物理 GPU 0 和 GPU 1，除非用户明确修改此规则。
+
+Windows 本地开发环境允许使用本机所有 GPU，包括 GPU 0。可以在显存余量至少 20% 的前提下并行运行实验。
 
 启动训练时必须显式设置 `CUDA_VISIBLE_DEVICES`。
 

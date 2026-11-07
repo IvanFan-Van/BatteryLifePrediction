@@ -1,243 +1,255 @@
-from dataclasses import dataclass
-from datetime import UTC, datetime
+"""Train the Tongji hierarchical state-space demo with offline experiment logs.
+
+uv run python train.py --config configs/tongji_pilot.yaml
+uv run python train.py --config configs/tongji_smoke.yaml
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import socket
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Annotated
 from uuid import uuid4
 
 import lightning as L
+import numpy as np
 import torch
-import torch.nn.functional as F
-import tyro
 import wandb
 import yaml
-from lightning.pytorch.callbacks import (
-    DeviceStatsMonitor,
-    LearningRateMonitor,
-    ModelCheckpoint,
+from lightning.pytorch.callbacks import Callback, ModelCheckpoint
+from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger, WandbLogger
+
+from training.data import (
+    build_datasets,
+    fit_normalization,
+    make_loader,
+    vocabulary_sizes,
 )
-from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
-from torch import nn, optim
-from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, transforms
-from torchvision.models import resnet18
+from training.evaluation import evaluate, plot_results
+from training.module import BatteryTrajectoryModule
 
 
-@dataclass
-class Args:
-    config: str = "config/baseline.yaml"
-    resume: Annotated[str | None, tyro.conf.arg(metavar="RUN_ID")] = None
+class RunDiagnostics(Callback):
+    def __init__(self, run_dir):
+        self.run_dir = Path(run_dir)
+        self.recorded = False
 
+    def on_after_backward(self, trainer, pl_module):
+        norms = dict(encoder=0.0, dynamics=0.0, head=0.0)
+        for name, parameter in pl_module.model.named_parameters():
+            if parameter.grad is None:
+                continue
+            if not torch.isfinite(parameter.grad).all():
+                raise FloatingPointError(f"Nonfinite gradient: {name}")
+            group = "encoder"
+            if name.startswith("dynamics."):
+                group = "dynamics"
+            elif name.startswith("head."):
+                group = "head"
+            norms[group] += float(parameter.grad.detach().square().sum())
+        if not self.recorded:
+            norms = {key: value**0.5 for key, value in norms.items()}
+            if not all(value > 0 for value in norms.values()):
+                raise RuntimeError(f"A module has no gradient: {norms}")
+            (self.run_dir / "gradient_check.json").write_text(
+                json.dumps(norms, indent=2)
+            )
+            print("Finite nonzero gradient norms:", norms, flush=True)
+            self.recorded = True
 
-class LitResNet(L.LightningModule):
-    def __init__(self, cfg):
-        super().__init__()
-        self.save_hyperparameters(cfg)
-
-        self.net = resnet18(weights=None)
-
-        # 将 ImageNet 风格的 stem 适配到 32x32 CIFAR-10
-        self.net.conv1 = nn.Conv2d(
-            3, 64, kernel_size=3, stride=1, padding=1, bias=False
-        )
-        self.net.maxpool = nn.Identity()  # type: ignore
-        self.net.fc = nn.Linear(self.net.fc.in_features, cfg["model"]["num_classes"])
-
-    def forward(self, x):
-        return self.net(x)
-
-    def shared_step(self, batch, stage):
-        x, y = batch
-        logits = self(x)
-
-        loss = F.cross_entropy(logits, y)
-        acc = (logits.argmax(dim=1) == y).float().mean()
-
-        self.log(
-            f"{stage}/loss",
-            loss,
-            on_step=(stage == "train"),
-            on_epoch=True,
-            batch_size=len(x),
-        )
-        self.log(
-            f"{stage}/acc",
-            acc,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            batch_size=len(x),
-        )
-        return loss
-
-    def training_step(self, batch, batch_idx):
-        return self.shared_step(batch, "train")
-
-    def validation_step(self, batch, batch_idx):
-        self.shared_step(batch, "val")
-
-    def configure_optimizers(self):  # type: ignore
-        cfg = self.hparams
-        opt = cfg["optimizer"]
-        optimizer = optim.SGD(
-            self.parameters(),
-            lr=opt["lr"],
-            momentum=opt["momentum"],
-            weight_decay=opt["weight_decay"],
-        )
-
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=cfg["trainer"]["max_epochs"]
-        )
-
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {"scheduler": scheduler, "interval": "epoch"},
+    def on_train_epoch_end(self, trainer, pl_module):
+        metrics = trainer.callback_metrics
+        values = {
+            key: float(metrics[key])
+            for key in ["train/mse", "val/mse"]
+            if key in metrics
         }
+        print(f"Epoch {trainer.current_epoch + 1}: {values}", flush=True)
 
 
-def create_dataloaders(cfg):
-    mean = (0.4914, 0.4822, 0.4465)
-    std = (0.2470, 0.2435, 0.2616)
-
-    train_tf = transforms.Compose(
-        [
-            transforms.RandomCrop(32, padding=4),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std),
-        ]
-    )
-    val_tf = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Normalize(mean, std),
-        ]
+def write_json(path, value):
+    Path(path).write_text(
+        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    root = cfg["data"]["root"]
 
-    train_full = datasets.CIFAR10(root, train=True, download=True, transform=train_tf)
-    val_full = datasets.CIFAR10(root, train=True, download=False, transform=val_tf)
-
-    # 用固定种子生成一次数据划分
-    generator = torch.Generator().manual_seed(cfg["data"]["split_seed"])
-
-    indices = torch.randperm(len(train_full), generator=generator).tolist()
-
-    n_val = int(len(train_full) * cfg["data"]["val_ratio"])
-
-    val_indices = indices[:n_val]
-    train_indices = indices[n_val:]
-
-    # 两套 Dataset 分别使用不重叠的索引
-    train_ds = Subset(train_full, train_indices)
-    val_ds = Subset(val_full, val_indices)
-
-    loader_args = {
-        "batch_size": cfg["data"]["batch_size"],
-        "num_workers": cfg["data"]["num_workers"],
+def source_manifest(root):
+    files = [Path("train.py")]
+    for folder in ["models", "training", "battery_data"]:
+        files.extend(p.relative_to(root) for p in (root / folder).glob("*.py"))
+    return {
+        str(path): hashlib.sha256((root / path).read_bytes()).hexdigest()
+        for path in files
     }
-
-    return (
-        DataLoader(train_ds, shuffle=True, **loader_args),
-        DataLoader(val_ds, shuffle=False, **loader_args),
-    )
 
 
 def main():
-    args = tyro.cli(Args)
-
-    if args.resume is None:
-        # 新实验：自动生成 ID
-        run_id = datetime.now(tz=UTC).strftime("%Y%m%d-%H%M%S-") + uuid4().hex[:6]
-        run_dir = Path("runs") / run_id
-        run_dir.mkdir(parents=True, exist_ok=False)
-
-        with open(args.config) as f:
-            cfg = yaml.safe_load(f)
-
-        with open(run_dir / "config.yaml", "w") as f:
-            yaml.safe_dump(cfg, f)
-
-        ckpt_path = None
-    else:
-        # 恢复实验：使用原来的 ID
-        run_id = args.resume
-        run_dir = Path("runs") / run_id
-
-        if not run_dir.is_dir():
-            raise FileNotFoundError(run_dir)
-
-        with open(run_dir / "config.yaml") as f:
-            cfg = yaml.safe_load(f)
-
-        ckpt_path = run_dir / "checkpoints" / "last.ckpt"
-
-        if not ckpt_path.is_file():
-            raise FileNotFoundError(ckpt_path)
-
-    L.seed_everything(cfg["seed"], workers=True)
-    tb = TensorBoardLogger(str(run_dir), name="tensorboard", version="main")
-    wb = WandbLogger(
-        project=cfg["experiment"]["project"],
-        group=cfg["experiment"]["group"],
-        name=cfg["experiment"]["name"],
-        save_dir=str(run_dir),
-        id=run_id,
-        resume="must" if args.resume else "never",
-        log_model=False,
-        offline=True,  # TODO: offline
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config", type=Path, default=Path("configs/tongji_smoke.yaml")
     )
-    wb.experiment.config.update(cfg)
+    parser.add_argument("--run-dir", type=Path)
+    parser.add_argument(
+        "--resume", type=Path, help="Existing run directory with checkpoints/last.ckpt"
+    )
+    args = parser.parse_args()
+    project = Path(__file__).resolve().parent
+    if args.resume:
+        run_dir = args.resume.resolve()
+        config = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
+        ckpt_path = str(run_dir / "checkpoints/last.ckpt")
+        if not Path(ckpt_path).is_file():
+            raise FileNotFoundError(ckpt_path)
+    else:
+        config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + uuid4().hex[:6]
+        run_dir = (
+            args.run_dir.resolve() if args.run_dir else (project / "runs" / run_id)
+        )
+        if run_dir.exists():
+            if not (run_dir / "queued.json").is_file():
+                raise FileExistsError(run_dir)
+            if (run_dir / "checkpoints").exists():
+                raise FileExistsError("Use --resume for an existing training run")
+        else:
+            run_dir.mkdir(parents=True)
+        config["data"]["root"] = str(Path(config["data"]["root"]).resolve())
+        (run_dir / "config.yaml").write_text(
+            yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
+        )
+        ckpt_path = None
+    os.environ["WANDB_MODE"] = "offline"
+    os.environ["WANDB_SILENT"] = "true"
+    if config["trainer"]["accelerator"] == "cpu":
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    elif os.name != "nt" and "farady" in socket.gethostname().lower() and os.environ.get("CUDA_VISIBLE_DEVICES") not in ["2", "3", "2,3", "3,2"]:
+        raise ValueError(
+            "farady GPU runs require explicit CUDA_VISIBLE_DEVICES selecting physical GPU 2/3"
+        )
+    torch.set_num_threads(config["trainer"]["cpu_threads"])
+    L.seed_everything(config["seed"], workers=True)
+    saved_splits = None
+    if args.resume:
+        saved_splits = json.loads((run_dir / "splits.json").read_text())
+    datasets, splits = build_datasets(config, saved_splits)
+    write_json(run_dir / "splits.json", splits)
+    if args.resume:
+        normalization = json.loads((run_dir / "normalization.json").read_text())
+    else:
+        normalization = fit_normalization(
+            config["data"]["root"], [config["data"]["train_cell"]]
+        )
+        write_json(run_dir / "normalization.json", normalization)
+    sizes = vocabulary_sizes(config["data"]["root"])
+    module = BatteryTrajectoryModule(config, sizes, normalization)
+    try:
+        git_commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=project, text=True
+        ).strip()
+    except subprocess.CalledProcessError:
+        git_commit = "source-snapshot"
+    sources = source_manifest(project)
+    write_json(
+        run_dir / "provenance.json",
+        dict(
+            git_commit=git_commit,
+            source_sha256=sources,
+            torch_version=torch.__version__,
+            wandb_mode="offline",
+        ),
+    )
+    if not args.resume and not (run_dir / "source").exists():
+        for name in sources:
+            destination = run_dir / "source" / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(project / name, destination)
+    parameter_count = sum(p.numel() for p in module.parameters())
+    print("Run directory:", run_dir, flush=True)
+    print("Parameters:", parameter_count, flush=True)
+    print("Anchor samples:", {k: len(v) for k, v in datasets.items()}, flush=True)
     checkpoint = ModelCheckpoint(
         dirpath=run_dir / "checkpoints",
-        monitor="val/acc",
-        mode="max",
+        monitor="val/mse",
+        mode="min",
+        filename="best-{epoch:03d}",
         save_top_k=1,
         save_last=True,
         auto_insert_metric_name=False,
-        save_weights_only=False,
     )
-
-    train_loader, val_loader = create_dataloaders(cfg)
-    model = LitResNet(cfg)
-    wb.watch(
-        model,
-        log="gradients",
-        log_freq=100,
+    wb = WandbLogger(
+        project=config["experiment"]["project"],
+        group=config["experiment"]["group"],
+        name=config["experiment"]["name"],
+        save_dir=str(run_dir),
+        id=run_dir.name,
+        offline=True,
+        log_model=False,
     )
-
-    tcfg = cfg["trainer"]
+    wb.experiment.config.update(config)
     trainer = L.Trainer(
-        max_epochs=tcfg["max_epochs"],
-        limit_train_batches=tcfg["limit_train_batches"],
-        limit_val_batches=tcfg["limit_val_batches"],
-        log_every_n_steps=tcfg["log_every_n_steps"],
-        num_sanity_val_steps=0,
-        accelerator="auto",
+        accelerator=config["trainer"]["accelerator"],
         devices=1,
-        logger=[tb, wb],
-        callbacks=[
-            checkpoint,
-            # DeviceStatsMonitor(),
-            LearningRateMonitor(logging_interval="epoch"),
+        max_epochs=config["trainer"]["max_epochs"],
+        limit_train_batches=config["trainer"]["limit_train_batches"],
+        limit_val_batches=config["trainer"]["limit_val_batches"],
+        limit_test_batches=config["trainer"]["limit_test_batches"],
+        gradient_clip_val=config["trainer"]["gradient_clip_val"],
+        log_every_n_steps=1,
+        num_sanity_val_steps=1,
+        deterministic=True,
+        enable_progress_bar=False,
+        logger=[
+            CSVLogger(str(run_dir), name="csv", version="main"),
+            TensorBoardLogger(str(run_dir), name="tensorboard", version="main"),
+            wb,
         ],
-        deterministic="warn",
+        callbacks=[checkpoint, RunDiagnostics(run_dir)],
     )
-
-    trainer.fit(
-        model,
-        train_dataloaders=train_loader,
-        val_dataloaders=val_loader,
-        ckpt_path=(str(ckpt_path) if ckpt_path is not None else None),
-    )
-
-    print("Run:", run_id)
-    print("Best Validation Accuracy:", checkpoint.best_model_score.item())  # type: ignore
-    print("Best Checkpoint:", checkpoint.best_model_path)
-    print("Best checkpoint:", checkpoint.best_model_path)
-
-    wandb.finish()
+    loaders = {
+        k: make_loader(v, config, shuffle=(k == "train")) for k, v in datasets.items()
+    }
+    try:
+        trainer.fit(
+            module,
+            train_dataloaders=loaders["train"],
+            val_dataloaders=loaders["val"],
+            ckpt_path=ckpt_path,
+        )
+        test_metrics = trainer.test(
+            module, dataloaders=loaders["test"], ckpt_path="best"
+        )[0]
+        # trainer.test loads the best validation checkpoint into this module.
+        metrics, predictions = {}, {}
+        limit = config["trainer"].get("evaluation_batches")
+        for stage, key in [("train", "train_eval"), ("val", "val"), ("test", "test")]:
+            metrics[stage], predictions[stage] = evaluate(module, loaders[key], limit)
+            npz_path = run_dir / f"{stage}_predictions.npz"
+            np.savez_compressed(npz_path, **predictions[stage])
+        results = dict(
+            metrics=metrics,
+            lightning_test=test_metrics,
+            best_checkpoint=checkpoint.best_model_path,
+            best_val_mse=float(checkpoint.best_model_score),
+            parameter_count=parameter_count,
+            evaluation_view_seed=config["data"]["eval_seed"],
+            validation_note=splits["note"],
+            device=config["trainer"]["accelerator"],
+        )
+        write_json(run_dir / "metrics.json", results)
+        plot_results(run_dir, predictions)
+        for stage, value in metrics.items():
+            for metric in ["mse", "rmse", "mae"]:
+                wb.experiment.summary[f"best/{stage}/{metric}"] = value[metric]
+        wb.experiment.summary["parameter_count"] = parameter_count
+        print(json.dumps(results, indent=2), flush=True)
+    finally:
+        for dataset in datasets.values():
+            dataset.close()
+        wandb.finish()
 
 
 if __name__ == "__main__":
