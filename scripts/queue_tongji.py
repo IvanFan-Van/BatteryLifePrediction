@@ -5,8 +5,9 @@
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
-import shutil
+import shlex
 import subprocess
 import sys
 from uuid import uuid4
@@ -15,7 +16,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from train import source_manifest
+from src.utils.files import read_yaml, write_json
+from src.utils.paths import OUTPUTS_DIR, processed_data_path
+from src.utils.runtime import clean_environment
+from src.utils.snapshot import copy_source, source_manifest
 
 
 def main():
@@ -23,28 +27,29 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--pueue-config', type=Path)
     args = parser.parse_args()
-    config = yaml.safe_load(args.config.read_text(encoding='utf-8'))
-    config['data']['root'] = str(Path(config['data']['root']).resolve())
+    config = read_yaml(args.config)
+    config['data']['root'] = str(processed_data_path(config['data']['root']))
     run_id = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S-') + uuid4().hex[:6]
-    run_dir = ROOT/'runs'/run_id
+    run_dir = OUTPUTS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir/'config.yaml').write_text(yaml.safe_dump(config, sort_keys=False), encoding='utf-8')
     files = source_manifest(ROOT)
-    for name in [*files, 'pyproject.toml', 'uv.lock']:
-        destination = run_dir/'source'/name
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT/name, destination)
-    command = subprocess.list2cmdline([sys.executable, str(run_dir/'source/train.py'),
-                                      '--config', str(run_dir/'config.yaml'), '--run-dir', str(run_dir)])
+    copy_source(ROOT, run_dir / 'source', [*files, 'pyproject.toml', 'uv.lock', 'README.md'])
+    arguments = [
+        sys.executable, '-m', 'src.core.train', '--config', str(run_dir / 'config.yaml'),
+        '--run-dir', str(run_dir),
+    ]
+    command = subprocess.list2cmdline(arguments) if os.name == 'nt' else shlex.join(arguments)
     queued = dict(command=command, source_sha256=files, config_source=str(args.config.resolve()))
-    (run_dir/'queued.json').write_text(json.dumps(queued, indent=2), encoding='utf-8')
+    write_json(run_dir / 'queued.json', queued)
     client = ['pueue']
     if args.pueue_config:
         client += ['--config', str(args.pueue_config.resolve())]
     output = subprocess.check_output([*client, 'add', '--print-task-id', '--working-directory',
-                                      str(run_dir/'source'), '--label', 'tongji-single-cell-smoke', '--', command],text=True)
+                                      str(run_dir/'source'), '--label', 'tongji-single-cell-smoke', '--', command],
+                                     text=True, env=clean_environment())
     queued['task_id'] = output.strip()
-    (run_dir/'queued.json').write_text(json.dumps(queued, indent=2), encoding='utf-8')
+    write_json(run_dir / 'queued.json', queued)
     print(json.dumps(dict(run_dir=str(run_dir),task_id=output.strip()),indent=2))
 
 

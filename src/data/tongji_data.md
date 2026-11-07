@@ -6,12 +6,12 @@ From the project root:
 
 ```bash
 uv sync --locked
-uv run python scripts/preprocess_tongji.py --output data/tongji_v1
+uv run python scripts/preprocess_tongji.py --output data/processed/tongji_v1
 uv run python -m unittest discover -s tests -v
 ```
 
 The preprocessing command reads trusted BatteryLife `.pkl` files from
-`raw_data/Tongji`. It refuses to overwrite an existing output directory; choose a
+`data/raw/Tongji`. It refuses to overwrite an existing output directory; choose a
 new version directory when changing rules. Open `notebooks/Tongji.ipynb` with the
 project virtual environment and run all cells. Each run picks a random cell and
 cycle, records its seed, compares original and extracted curves, and displays
@@ -70,10 +70,10 @@ rest schedule. BatteryLife's upstream time normalization may compress gaps;
 
 ```python
 from torch.utils.data import DataLoader
-from battery_data import TongjiDataset, collate_tongji
+from src.data import TongjiDataset, collate_tongji
 
 train = TongjiDataset(
-    'data/tongji_v1', cell_ids=['Tongji1_CY25-025_1--1'],
+    'data/processed/tongji_v1', cell_ids=['Tongji1_CY25-025_1--1'],
     samples_per_cell=128, history_cycles=(1, 8), segment_points=(16, 128),
     horizon=32, max_anchor_cycle=100,
     channel_mask_probability=0.0, seed=42,

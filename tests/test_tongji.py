@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from battery_data.tongji import TongjiDataset, collate_tongji
-from scripts.preprocess_tongji import extract_cycle, protocol
+from src.data import TongjiDataset, collate_tongji
+from src.data.preprocess_tongji import extract_cycle, protocol
 
 
 class TongjiDataTests(unittest.TestCase):

@@ -1,15 +1,15 @@
 """Cell-level selection, explicit anchor splits, and training-only scaling."""
-import json
-from pathlib import Path
-
 import numpy as np
 from torch.utils.data import DataLoader
 
-from battery_data import TongjiDataset, collate_tongji, load_cell
+from src.data import TongjiDataset, collate_tongji, load_cell
+from src.utils.files import read_json
+from src.utils.paths import processed_data_path
 
 
 def fit_normalization(root, training_cell_ids):
     """Fit on training cells only, never on SOH or the held-out test cell."""
+    cells_dir = processed_data_path(root) / 'cells'
     groups = [('feature', 'values', 'value_valid'),
               ('static', 'static_numeric', 'static_valid'),
               ('condition', 'conditions', 'conditions_valid')]
@@ -17,7 +17,7 @@ def fit_normalization(root, training_cell_ids):
     for prefix, key, valid_key in groups:
         sums = squares = counts = None
         for cell_id in training_cell_ids:
-            cell = load_cell(Path(root) / 'cells' / cell_id)
+            cell = load_cell(cells_dir / cell_id)
             x = np.asarray(cell[key], dtype=np.float64)
             valid = np.asarray(cell[valid_key])
             if prefix == 'static':
@@ -81,6 +81,7 @@ def make_loader(dataset, config, shuffle=False):
 
 
 def vocabulary_sizes(root):
-    mapping = json.loads((Path(root) / 'category_mapping.json').read_text(encoding='utf-8'))
-    schema = json.loads((Path(root) / 'schema.json').read_text(encoding='utf-8'))
+    root = processed_data_path(root)
+    mapping = read_json(root / 'category_mapping.json')
+    schema = read_json(root / 'schema.json')
     return [len(mapping[field]) for field in schema['static_categorical']]

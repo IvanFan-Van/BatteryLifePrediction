@@ -7,9 +7,9 @@ import unittest
 import torch
 import yaml
 
-from models import HierarchicalStateSpaceModel
-from training.data import build_datasets
-from training.module import trajectory_errors
+from src.core.hierarchical_ssm import HierarchicalStateSpaceModel
+from src.data.loading import build_datasets
+from src.core.module import trajectory_errors
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -125,10 +125,10 @@ class AttentionModelTests(unittest.TestCase):
             with torch.no_grad():
                 torch.testing.assert_close(model(batch),restored(batch))
 
-    @unittest.skipUnless((ROOT/'data/tongji_v1/manifest.json').exists(),'Preprocessed data required')
+    @unittest.skipUnless((ROOT/'data/processed/tongji_v1/manifest.json').exists(),'Preprocessed data required')
     def test_full_cell_anchor_schedule_and_holdout_split(self):
         config=yaml.safe_load((ROOT/'configs/tongji_smoke.yaml').read_text())
-        config['data']['root']=str(ROOT/'data/tongji_v1')
+        config['data']['root']=str(ROOT/'data/processed/tongji_v1')
         datasets,splits=build_datasets(config)
         try:
             self.assertFalse(set(splits['train_anchors']) & set(splits['val_anchors']))

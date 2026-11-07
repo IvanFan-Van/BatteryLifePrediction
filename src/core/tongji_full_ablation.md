@@ -6,7 +6,7 @@ This study is launched with:
 uv run python scripts/tongji_study.py launch --config configs/tongji_ablation.yaml
 ```
 
-The study root is created under `runs/tongji-static-ablation-<Hong-Kong timestamp>/`.
+The study root is created under `outputs/tongji-static-ablation-<Hong-Kong timestamp>/`.
 Its `report.md` updates during execution and contains the final comparison. The
 controller and workers run through an isolated Pueue daemon; two experiment slots
 are configured with `pueue parallel --group experiments 2`. Closing the chat does
@@ -46,7 +46,7 @@ with validation early-stopping patience 5 and minimum 8 epochs. The scheduler ma
 reduce the SAME final epoch budget for both variants based on measured epoch time
 and the morning deadline. Actual completed epochs, failed jobs, and chosen
 hyperparameters are reported, rather than substituting incomplete runs silently.
-The default deadline for this night's config is 2026-11-05 08:00 Asia/Hong_Kong.
+The saved YAML files preserve the original study deadline. Set `deadline_local` to a future time before launching a new study.
 
 Primary selection metric is equal-cell-weight validation MSE: each anchor's valid
 future-label MSE is averaged within its cell, then averaged over cells. This avoids

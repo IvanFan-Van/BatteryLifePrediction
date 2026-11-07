@@ -1,8 +1,8 @@
-"""Lightning wrapper; ordinary PyTorch model lives in models/."""
+"""Lightning wrapper; ordinary PyTorch model lives in hierarchical_ssm.py."""
 import lightning as L
 import torch
 
-from models import HierarchicalStateSpaceModel
+from .hierarchical_ssm import HierarchicalStateSpaceModel
 
 
 def trajectory_errors(prediction, target, valid):

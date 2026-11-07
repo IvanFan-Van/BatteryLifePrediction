@@ -13,6 +13,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+from src.utils.paths import TONGJI_DATA_DIR, processed_data_path
 from torch.utils.data import Dataset, get_worker_info
 
 ARRAY_NAMES = (
@@ -62,7 +64,7 @@ class TongjiDataset(Dataset):
 
     def __init__(
         self,
-        root="data/tongji_v1",
+        root=TONGJI_DATA_DIR,
         cell_ids=None,
         *,
         samples_per_cell=128,
@@ -77,7 +79,7 @@ class TongjiDataset(Dataset):
         anchor_cycle_ids=None,
         enumerate_anchors=False,
     ):
-        self.root = Path(root)
+        self.root = processed_data_path(root)
         manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
         if not manifest.get("complete"):
             raise ValueError("Preprocessing is incomplete")

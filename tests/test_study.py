@@ -4,16 +4,18 @@ import os
 import unittest
 from unittest.mock import patch
 import torch
-from training.study import clean_environment,evaluate_cells,stratified_cell_split
+from src.core.study import evaluate_cells
+from src.data.study import stratified_cell_split
+from src.utils.runtime import clean_environment
 
 ROOT=Path(__file__).resolve().parents[1]
 
 
 class StudyTests(unittest.TestCase):
-    @unittest.skipUnless((ROOT/'data/tongji_v1/manifest.json').exists(),'Processed data required')
+    @unittest.skipUnless((ROOT/'data/processed/tongji_v1/manifest.json').exists(),'Processed data required')
     def test_all_cells_are_disjoint_and_protocol_stratified(self):
-        split=stratified_cell_split(ROOT/'data/tongji_v1')
-        self.assertEqual(split,stratified_cell_split(ROOT/'data/tongji_v1'))
+        split=stratified_cell_split(ROOT/'data/processed/tongji_v1')
+        self.assertEqual(split,stratified_cell_split(ROOT/'data/processed/tongji_v1'))
         all_cells=[cid for name in ['train','val','test'] for cid in split[name]]
         self.assertEqual(len(all_cells),130)
         self.assertEqual(len(set(all_cells)),130)

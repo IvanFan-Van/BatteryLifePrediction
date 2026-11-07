@@ -15,10 +15,12 @@ import yaml
 from lightning.pytorch.callbacks import EarlyStopping,ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger,TensorBoardLogger,WandbLogger
 
-from train import RunDiagnostics
-from training.data import make_loader,vocabulary_sizes
-from training.evaluation import plot_results
-from training.study import StudyModule,StudyProgress,atomic_json,study_datasets,evaluate_cells
+from src.callbacks import RunDiagnostics, StudyProgress
+from src.data.loading import make_loader,vocabulary_sizes
+from .evaluation import plot_results
+from src.data.study import study_datasets
+from src.utils.files import atomic_json
+from .study import StudyModule, evaluate_cells
 
 
 def main():

@@ -56,12 +56,12 @@ not an entire lifetime-to-EOL rollout yet.
 
 ```bash
 uv run python -m unittest discover -s tests -v
-uv run python train.py --config configs/tongji_pilot.yaml
+uv run python -m src.core.train --config configs/tongji_pilot.yaml
 uv run python scripts/queue_tongji.py --config configs/tongji_smoke.yaml
 # To target an explicitly selected local daemon:
-uv run python scripts/queue_tongji.py --config configs/tongji_smoke.yaml --pueue-config tmp/pueue-tongji/pueue.yml
+uv run python scripts/queue_tongji.py --config configs/tongji_smoke.yaml
 # Resume an interrupted run with its saved effective configuration:
-uv run python train.py --resume runs/<run-id>
+uv run python -m src.core.train --resume outputs/<run-id>
 ```
 
 Pilot uses 1 epoch and 2 batches per stage. Full smoke uses all batches for 30
@@ -78,7 +78,7 @@ source/, gradient_check.json, checkpoints/, metrics.json, per-stage predictions.
 learning_curves.png, trajectories.png, and offline W&B/TensorBoard/CSV logs.
 Queue submission saves config and Python source before enqueueing; tasks run that
 frozen source so later workspace edits cannot change a queued experiment.
-Generated outputs stay under ignored runs/. Original data and notebook are untouched.
+Generated outputs stay under ignored outputs/. Original data and notebook are untouched.
 
 Metric definitions: MSE and MAE average within each sample's valid horizon, then
 average over samples. RMSE is the square root of that aggregate MSE. SOH is a

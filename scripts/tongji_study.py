@@ -1,13 +1,11 @@
 """Prepare, queue, supervise, and summarize a frozen overnight Tongji study."""
 import argparse
-from collections import Counter
 from datetime import datetime,timedelta,timezone
 import hashlib
 import itertools
 import json
 import os
 from pathlib import Path
-import shutil
 import socket
 import subprocess
 import sys
@@ -18,12 +16,12 @@ import yaml
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
-from training.data import fit_normalization
-from training.study import atomic_json,clean_environment,stratified_cell_split
-
-
-def read_json(path):
-    return json.loads(Path(path).read_text(encoding='utf-8'))
+from src.data.loading import fit_normalization
+from src.data.study import stratified_cell_split
+from src.utils.files import atomic_json, read_json, read_yaml
+from src.utils.paths import OUTPUTS_DIR, processed_data_path
+from src.utils.runtime import clean_environment
+from src.utils.snapshot import copy_source, source_manifest
 
 
 def client(study,*arguments):
@@ -213,10 +211,10 @@ def control(study):
 
 
 def prepare(config_path):
-    settings=yaml.safe_load(Path(config_path).read_text(encoding='utf-8'))
-    base=yaml.safe_load((ROOT/settings['base_config']).read_text(encoding='utf-8'))
+    settings=read_yaml(config_path)
+    base=read_yaml(ROOT / settings['base_config'])
     base['data'].update(settings.get('data_overrides',{}))
-    base['data']['root']=str((ROOT/base['data']['root']).resolve())
+    base['data']['root']=str(processed_data_path(ROOT / base['data']['root']))
     base['trainer'].update(settings.get('trainer_overrides',{}))
     base['trainer']['cpu_threads']=settings['cpu_threads']
     base['trainer']['accelerator']=settings.get('accelerator','gpu')
@@ -224,20 +222,17 @@ def prepare(config_path):
     deadline=datetime.fromisoformat(settings['deadline_local']).astimezone(timezone.utc)
     if deadline<=datetime.now(timezone.utc):raise ValueError('Morning deadline has already passed')
     stamp=datetime.now(timezone(timedelta(hours=8))).strftime('%Y%m%d-%H%M%S')
-    study=ROOT/'runs'/f"{settings.get('name','tongji-ablation')}-{stamp}"
+    study=OUTPUTS_DIR / f"{settings.get('name','tongji-ablation')}-{stamp}"
     study.mkdir(parents=True,exist_ok=False)
     for folder in ['configs','trials','source']:(study/folder).mkdir()
     splits=stratified_cell_split(base['data']['root'],settings['split_seed'])
     atomic_json(study/'splits.json',splits)
     atomic_json(study/'normalization.json',fit_normalization(base['data']['root'],splits['train']))
-    hashes={}
-    files=[ROOT/'train.py',ROOT/'pyproject.toml',ROOT/'uv.lock']
-    for folder in ['models','training','battery_data','scripts']:
-        files.extend((ROOT/folder).glob('*.py'))
-    for path in files:
-        relative=path.relative_to(ROOT);destination=study/'source'/relative
-        destination.parent.mkdir(parents=True,exist_ok=True);shutil.copy2(path,destination)
-        hashes[str(relative)]=hashlib.sha256(path.read_bytes()).hexdigest()
+    hashes = source_manifest(ROOT)
+    project_files = ['pyproject.toml', 'uv.lock', 'README.md']
+    copy_source(ROOT, study / 'source', [*hashes, *project_files])
+    for name in project_files:
+        hashes[name] = hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
     source_metadata={cid:read_json(Path(base['data']['root'])/'cells'/cid/'metadata.json')['source_sha256'] for name in ['train','val','test'] for cid in splits[name]}
     atomic_json(study/'provenance.json',dict(source_sha256=hashes,data_source_sha256=source_metadata,
                                            config_source=str(Path(config_path).resolve())))

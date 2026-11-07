@@ -4,7 +4,7 @@ experiment:
   name: hierarchical-static-tokens-pilot
 seed: 42
 data:
-  root: data/tongji_v1
+  root: data/processed/tongji_v1
   train_cell: Tongji1_CY25-025_1--4
   test_cell: Tongji1_CY25-025_1--5
   batch_size: 16

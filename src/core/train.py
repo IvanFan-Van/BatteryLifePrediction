@@ -1,14 +1,12 @@
 """Train the Tongji hierarchical state-space demo with offline experiment logs.
 
-uv run python train.py --config configs/tongji_pilot.yaml
-uv run python train.py --config configs/tongji_smoke.yaml
+uv run python -m src.core.train --config configs/tongji_pilot.yaml
+uv run python -m src.core.train --config configs/tongji_smoke.yaml
 """
 
 import argparse
-import hashlib
 import json
 import os
-import shutil
 import socket
 import subprocess
 from datetime import datetime, timezone
@@ -20,95 +18,46 @@ import numpy as np
 import torch
 import wandb
 import yaml
-from lightning.pytorch.callbacks import Callback, ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger, WandbLogger
 
-from training.data import (
+from src.data.loading import (
     build_datasets,
     fit_normalization,
     make_loader,
     vocabulary_sizes,
 )
-from training.evaluation import evaluate, plot_results
-from training.module import BatteryTrajectoryModule
+from .evaluation import evaluate, plot_results
+from .module import BatteryTrajectoryModule
 
-
-class RunDiagnostics(Callback):
-    def __init__(self, run_dir):
-        self.run_dir = Path(run_dir)
-        self.recorded = False
-
-    def on_after_backward(self, trainer, pl_module):
-        norms = dict(encoder=0.0, dynamics=0.0, head=0.0)
-        for name, parameter in pl_module.model.named_parameters():
-            if parameter.grad is None:
-                continue
-            if not torch.isfinite(parameter.grad).all():
-                raise FloatingPointError(f"Nonfinite gradient: {name}")
-            group = "encoder"
-            if name.startswith("dynamics."):
-                group = "dynamics"
-            elif name.startswith("head."):
-                group = "head"
-            norms[group] += float(parameter.grad.detach().square().sum())
-        if not self.recorded:
-            norms = {key: value**0.5 for key, value in norms.items()}
-            if not all(value > 0 for value in norms.values()):
-                raise RuntimeError(f"A module has no gradient: {norms}")
-            (self.run_dir / "gradient_check.json").write_text(
-                json.dumps(norms, indent=2)
-            )
-            print("Finite nonzero gradient norms:", norms, flush=True)
-            self.recorded = True
-
-    def on_train_epoch_end(self, trainer, pl_module):
-        metrics = trainer.callback_metrics
-        values = {
-            key: float(metrics[key])
-            for key in ["train/mse", "val/mse"]
-            if key in metrics
-        }
-        print(f"Epoch {trainer.current_epoch + 1}: {values}", flush=True)
-
-
-def write_json(path, value):
-    Path(path).write_text(
-        json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-
-
-def source_manifest(root):
-    files = [Path("train.py")]
-    for folder in ["models", "training", "battery_data"]:
-        files.extend(p.relative_to(root) for p in (root / folder).glob("*.py"))
-    return {
-        str(path): hashlib.sha256((root / path).read_bytes()).hexdigest()
-        for path in files
-    }
+from src.callbacks import RunDiagnostics
+from src.utils.files import read_json, read_yaml, write_json
+from src.utils.paths import CONFIGS_DIR, OUTPUTS_DIR, PROJECT_ROOT, processed_data_path, run_path
+from src.utils.snapshot import copy_source, source_manifest
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", type=Path, default=Path("configs/tongji_smoke.yaml")
+        "--config", type=Path, default=CONFIGS_DIR / "tongji_smoke.yaml"
     )
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
         "--resume", type=Path, help="Existing run directory with checkpoints/last.ckpt"
     )
     args = parser.parse_args()
-    project = Path(__file__).resolve().parent
     if args.resume:
-        run_dir = args.resume.resolve()
-        config = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
+        run_dir = run_path(args.resume)
+        config = read_yaml(run_dir / "config.yaml")
         ckpt_path = str(run_dir / "checkpoints/last.ckpt")
         if not Path(ckpt_path).is_file():
             raise FileNotFoundError(ckpt_path)
     else:
-        config = yaml.safe_load(args.config.read_text(encoding="utf-8"))
+        config = read_yaml(args.config)
+        config["data"]["root"] = str(processed_data_path(config["data"]["root"]))
         run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + uuid4().hex[:6]
         run_dir = (
-            args.run_dir.resolve() if args.run_dir else (project / "runs" / run_id)
+            args.run_dir.resolve() if args.run_dir else (OUTPUTS_DIR / run_id)
         )
         if run_dir.exists():
             if not (run_dir / "queued.json").is_file():
@@ -117,11 +66,11 @@ def main():
                 raise FileExistsError("Use --resume for an existing training run")
         else:
             run_dir.mkdir(parents=True)
-        config["data"]["root"] = str(Path(config["data"]["root"]).resolve())
         (run_dir / "config.yaml").write_text(
             yaml.safe_dump(config, sort_keys=False), encoding="utf-8"
         )
         ckpt_path = None
+    config["data"]["root"] = str(processed_data_path(config["data"]["root"]))
     os.environ["WANDB_MODE"] = "offline"
     os.environ["WANDB_SILENT"] = "true"
     if config["trainer"]["accelerator"] == "cpu":
@@ -134,11 +83,11 @@ def main():
     L.seed_everything(config["seed"], workers=True)
     saved_splits = None
     if args.resume:
-        saved_splits = json.loads((run_dir / "splits.json").read_text())
+        saved_splits = read_json(run_dir / "splits.json")
     datasets, splits = build_datasets(config, saved_splits)
     write_json(run_dir / "splits.json", splits)
     if args.resume:
-        normalization = json.loads((run_dir / "normalization.json").read_text())
+        normalization = read_json(run_dir / "normalization.json")
     else:
         normalization = fit_normalization(
             config["data"]["root"], [config["data"]["train_cell"]]
@@ -146,27 +95,26 @@ def main():
         write_json(run_dir / "normalization.json", normalization)
     sizes = vocabulary_sizes(config["data"]["root"])
     module = BatteryTrajectoryModule(config, sizes, normalization)
-    try:
-        git_commit = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=project, text=True
-        ).strip()
-    except subprocess.CalledProcessError:
-        git_commit = "source-snapshot"
-    sources = source_manifest(project)
-    write_json(
-        run_dir / "provenance.json",
-        dict(
-            git_commit=git_commit,
-            source_sha256=sources,
-            torch_version=torch.__version__,
-            wandb_mode="offline",
-        ),
-    )
-    if not args.resume and not (run_dir / "source").exists():
-        for name in sources:
-            destination = run_dir / "source" / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(project / name, destination)
+    if not args.resume:
+        try:
+            git_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            git_commit = "source-snapshot"
+        sources = source_manifest(PROJECT_ROOT)
+        write_json(
+            run_dir / "provenance.json",
+            dict(
+                git_commit=git_commit,
+                source_sha256=sources,
+                torch_version=torch.__version__,
+                wandb_mode="offline",
+            ),
+        )
+        if not (run_dir / "source").exists():
+            copy_source(PROJECT_ROOT, run_dir / "source", sources)
     parameter_count = sum(p.numel() for p in module.parameters())
     print("Run directory:", run_dir, flush=True)
     print("Parameters:", parameter_count, flush=True)
@@ -219,8 +167,17 @@ def main():
             val_dataloaders=loaders["val"],
             ckpt_path=ckpt_path,
         )
+        best_name = Path(checkpoint.best_model_path).name
+        best_score = checkpoint.best_model_score
+        if args.resume and best_score is None:
+            # Lightning skips restoring the best score when the checkpoint directory moved.
+            previous = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            best = previous["callbacks"][checkpoint.state_key]
+            best_name = Path(best["best_model_path"]).name
+            best_score = best["best_model_score"]
+        best_path = run_dir / "checkpoints" / best_name
         test_metrics = trainer.test(
-            module, dataloaders=loaders["test"], ckpt_path="best"
+            module, dataloaders=loaders["test"], ckpt_path=str(best_path)
         )[0]
         # trainer.test loads the best validation checkpoint into this module.
         metrics, predictions = {}, {}
@@ -232,8 +189,8 @@ def main():
         results = dict(
             metrics=metrics,
             lightning_test=test_metrics,
-            best_checkpoint=checkpoint.best_model_path,
-            best_val_mse=float(checkpoint.best_model_score),
+            best_checkpoint=str(best_path),
+            best_val_mse=float(best_score),
             parameter_count=parameter_count,
             evaluation_view_seed=config["data"]["eval_seed"],
             validation_note=splits["note"],
