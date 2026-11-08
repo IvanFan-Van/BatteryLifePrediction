@@ -1,10 +1,10 @@
 """Cell-level selection, explicit anchor splits, and training-only scaling."""
+from functools import partial
+
 import numpy as np
 from torch.utils.data import DataLoader
 
 from src.data import (
-    ObservationSchedule,
-    TongjiDataset,
     TongjiTaskDataset,
     TongjiTaskSampler,
     collate_tongji,
@@ -45,62 +45,110 @@ def fit_normalization(root, training_cell_ids):
     return result
 
 
+def _split_anchors(anchors, ratio, rng):
+    if not 0 < ratio < 1:
+        raise ValueError("val_ratio must be between 0 and 1")
+    shuffled = rng.permutation(anchors)
+    nval = max(1, round(len(anchors) * ratio))
+    if nval >= len(anchors):
+        raise ValueError("Not enough anchors for train/validation split")
+    return sorted(shuffled[nval:].tolist()), sorted(shuffled[:nval].tolist())
+
+
 def build_datasets(config, saved_splits=None):
-    data = config['data']
-    shared = dict(root=data['root'], horizon=data['horizon'])
-    if 'observation_schedule' in config:
-        schema = read_json(processed_data_path(data['root']) / 'schema.json')
-        schedule = ObservationSchedule.from_config(config, feature_count=len(schema['features']))
-        dataset_type = TongjiTaskDataset
-        shared.update(schedule=schedule, max_last_observed_cycle=data['max_anchor_cycle'])
-        train_options, eval_options = {}, {}
-    else:
-        dataset_type = TongjiDataset
-        shared.update(history_cycles=tuple(data['history_cycles']),
-                      segment_points=tuple(data['segment_points']),
-                      max_anchor_cycle=data['max_anchor_cycle'], enumerate_anchors=True)
-        train_options = dict(channel_mask_probability=data['channel_mask_probability'])
-        eval_options = dict(deterministic=True)
-    train_cell, test_cell = data['train_cell'], data['test_cell']
-    if train_cell == test_cell:
-        raise ValueError('Test cell must be independent of the training cell')
+    data = config["data"]
+    if "observation_schedule" not in data:
+        raise ValueError("Tongji training requires data.observation_schedule")
+    if "max_epochs" in config.get("trainer", {}):
+        raise ValueError("Set max_epochs under data")
+    make_dataset = partial(TongjiTaskDataset.from_config, config)
+    partitions = data["cell_ids"]
+    if not isinstance(partitions, dict) or not {"train", "test"} <= partitions.keys():
+        raise ValueError("cell_ids must define train and test lists")
+    for name, ids in partitions.items():
+        if name not in ("train", "val", "test"):
+            raise ValueError(f"Unknown cell_ids group: {name}")
+        if (
+            not isinstance(ids, list)
+            or not ids
+            or not all(isinstance(cid, str) for cid in ids)
+        ):
+            raise ValueError(f"cell_ids.{name} must be a nonempty list of cell IDs")
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"cell_ids.{name} contains duplicate cell IDs")
+
+    train_cells = sorted(partitions["train"])
+    test_cells = sorted(partitions["test"])
+    independent_val = "val" in partitions
+    val_cells = sorted(partitions["val"]) if independent_val else train_cells
+    if set(test_cells) & set(train_cells):
+        raise ValueError("Test cell IDs must be disjoint from training")
+    if independent_val and set(val_cells) & (set(train_cells) | set(test_cells)):
+        raise ValueError("Validation cell IDs must be disjoint from training and test")
+
+    cells = {
+        "train_cells": train_cells,
+        "val_cells": val_cells,
+        "test_cells": test_cells,
+    }
     if saved_splits is None:
-        candidate = dataset_type(**shared, cell_ids=[train_cell], **eval_options)
-        anchors = candidate.anchor_cycles(train_cell)
-        candidate.close()
-        rng = np.random.default_rng(data['split_seed'])
-        shuffled = rng.permutation(anchors)
-        nval = max(1, int(round(len(anchors) * data['val_ratio'])))
-        if nval >= len(anchors):
-            raise ValueError('Not enough anchors for train/validation split')
-        saved_splits = dict(train_cell=train_cell, test_cell=test_cell,
-                            train_anchors=sorted(shuffled[nval:].tolist()),
-                            val_anchors=sorted(shuffled[:nval].tolist()),
-                            note='Same-cell held-out anchors for validation. Historical observations and future labels may overlap; this is smoke validation, not independent-cell validation.')
-    if set(saved_splits['train_anchors']) & set(saved_splits['val_anchors']):
-        raise ValueError('Train and validation anchor IDs overlap')
-    train_anchors = {train_cell: saved_splits['train_anchors']}
-    val_anchors = {train_cell: saved_splits['val_anchors']}
-    train = dataset_type(**shared, cell_ids=[train_cell], anchor_cycle_ids=train_anchors,
-                         seed=config['seed'], **train_options)
-    train_eval = dataset_type(**shared, cell_ids=[train_cell], anchor_cycle_ids=train_anchors,
-                              seed=data['eval_seed'], **eval_options)
-    val = dataset_type(**shared, cell_ids=[train_cell], anchor_cycle_ids=val_anchors,
-                       seed=data['eval_seed'], **eval_options)
-    test = dataset_type(**shared, cell_ids=[test_cell], seed=data['eval_seed'], **eval_options)
-    return dict(train=train, train_eval=train_eval, val=val, test=test), saved_splits
+        train_anchors = val_anchors = None
+        if independent_val:
+            note = "Disjoint train, validation and test cells."
+        else:
+            train_anchors, val_anchors = {}, {}
+            rng = np.random.default_rng(data["split_seed"])
+            candidate = make_dataset(cell_ids=train_cells)
+            try:
+                for cell_id in train_cells:
+                    train_anchors[cell_id], val_anchors[cell_id] = _split_anchors(
+                        candidate.anchor_cycles(cell_id), data["val_ratio"], rng
+                    )
+            finally:
+                candidate.close()
+            note = "Same-cell held-out anchors. Historical observations and future labels may overlap."
+        saved_splits = dict(
+            cells, train_anchors=train_anchors, val_anchors=val_anchors, note=note
+        )
+    else:
+        if any(saved_splits.get(key) != value for key, value in cells.items()):
+            raise ValueError("Configured cell lists differ from the saved splits")
+        train_anchors = saved_splits["train_anchors"]
+        val_anchors = saved_splits["val_anchors"]
+        if not independent_val and any(
+            set(train_anchors[cell_id]) & set(val_anchors[cell_id])
+            for cell_id in train_cells
+        ):
+            raise ValueError("Train and validation anchor IDs overlap")
+
+    eval_seed = data["eval_seed"]
+    return {
+        "train": make_dataset(cell_ids=train_cells, anchor_cycle_ids=train_anchors),
+        "train_eval": make_dataset(
+            cell_ids=train_cells, anchor_cycle_ids=train_anchors, seed=eval_seed
+        ),
+        "val": make_dataset(
+            cell_ids=val_cells, anchor_cycle_ids=val_anchors, seed=eval_seed
+        ),
+        "test": make_dataset(cell_ids=test_cells, seed=eval_seed),
+    }, saved_splits
 
 
 def make_loader(dataset, config, shuffle=False):
-    sampler = None
-    if isinstance(dataset, TongjiTaskDataset):
-        # Use the final observation policy for every fixed-view evaluation.
-        fixed_epoch = None if shuffle else dataset.schedule.max_epochs - 1
-        sampler = TongjiTaskSampler(dataset, seed=config['seed'], fixed_epoch=fixed_epoch)
-        shuffle = False
-    return DataLoader(dataset, batch_size=config['data']['batch_size'], shuffle=shuffle,
-                      sampler=sampler, num_workers=config['data']['num_workers'],
-                      collate_fn=collate_tongji, persistent_workers=False)
+    data = config["data"]
+    # Use the final observation policy for every fixed-view evaluation.
+    fixed_epoch = None if shuffle else dataset.max_epochs - 1
+    sampler = TongjiTaskSampler(
+        dataset, seed=config["seed"], fixed_epoch=fixed_epoch
+    )
+    return DataLoader(
+        dataset,
+        batch_size=data["batch_size"],
+        sampler=sampler,
+        num_workers=data["num_workers"],
+        collate_fn=collate_tongji,
+        persistent_workers=False,
+    )
 
 
 def vocabulary_sizes(root):

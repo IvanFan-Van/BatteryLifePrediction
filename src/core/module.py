@@ -37,11 +37,6 @@ class BatteryTrajectoryModule(L.LightningModule):
                  batch_size=len(prediction))
         return mse.mean()
 
-    def on_train_epoch_start(self):
-        set_epoch = getattr(self.trainer.train_dataloader.dataset, 'set_epoch', None)
-        if set_epoch is not None:
-            set_epoch(self.current_epoch)
-
     def training_step(self, batch, batch_idx):
         return self.shared_step(batch, 'train')
 

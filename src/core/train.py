@@ -1,7 +1,6 @@
 """Train the Tongji hierarchical state-space demo with offline experiment logs.
 
-uv run python -m src.core.train --config configs/tongji_pilot.yaml
-uv run python -m src.core.train --config configs/tongji_smoke.yaml
+uv run python -m src.core.train --config configs/tongji_curriculum_pilot.yaml
 """
 
 import argparse
@@ -22,7 +21,6 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger, WandbLogger
 
 from src.callbacks import RunDiagnostics
-from src.data import TongjiTaskSampler
 from src.data.loading import (
     build_datasets,
     fit_normalization,
@@ -46,7 +44,7 @@ from .module import BatteryTrajectoryModule
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", type=Path, default=CONFIGS_DIR / "tongji_smoke.yaml"
+        "--config", type=Path, default=CONFIGS_DIR / "tongji_curriculum_pilot.yaml"
     )
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
@@ -97,11 +95,12 @@ def main():
         saved_splits = read_json(run_dir / "splits.json")
     datasets, splits = build_datasets(config, saved_splits)
     write_json(run_dir / "splits.json", splits)
+    max_epochs = datasets["train"].max_epochs
     if args.resume:
         normalization = read_json(run_dir / "normalization.json")
     else:
         normalization = fit_normalization(
-            config["data"]["root"], [config["data"]["train_cell"]]
+            config["data"]["root"], splits["train_cells"]
         )
         write_json(run_dir / "normalization.json", normalization)
     sizes = vocabulary_sizes(config["data"]["root"])
@@ -154,7 +153,7 @@ def main():
     trainer = L.Trainer(
         accelerator=config["trainer"]["accelerator"],
         devices=1,
-        max_epochs=config["trainer"]["max_epochs"],
+        max_epochs=max_epochs,
         limit_train_batches=config["trainer"]["limit_train_batches"],
         limit_val_batches=config["trainer"]["limit_val_batches"],
         limit_test_batches=config["trainer"]["limit_test_batches"],
@@ -175,13 +174,11 @@ def main():
     }
     try:
         train_sampler = loaders["train"].sampler
-        if args.resume and isinstance(train_sampler, TongjiTaskSampler):
+        if args.resume:
             previous = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             # Lightning can prefetch before calling set_epoch on the resumed sampler.
             next_epoch = int(previous["epoch"]) + 1
-            train_sampler.set_epoch(
-                min(next_epoch, config["trainer"]["max_epochs"] - 1)
-            )
+            train_sampler.set_epoch(min(next_epoch, max_epochs - 1))
             del previous
         trainer.fit(
             module,

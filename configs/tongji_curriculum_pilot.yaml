@@ -4,16 +4,27 @@ experiment:
     name: tongji-observation-curriculum-pilot
 seed: 42
 data:
-    root: data/processed/tongji_v1
-    train_cell: Tongji1_CY25-025_1--4
-    test_cell: Tongji1_CY25-025_1--5
     batch_size: 2
     num_workers: 0
     val_ratio: 0.2
     split_seed: 2026
     eval_seed: 2027
+    root: data/processed/tongji_v1
+    cell_ids:
+        train: [Tongji1_CY25-025_1--4]
+        test: [Tongji1_CY25-025_1--5]
     horizon: 4
-    max_anchor_cycle: 6
+    max_last_observed_cycle: 6
+    max_epochs: 2
+    observation_schedule:
+        - start_epoch: 0
+          cycle_fraction: 1.0
+          segment_fraction: 1.0
+          value_keep: 1.0
+        - start_epoch: 1
+          cycle_fraction: 0.5
+          segment_fraction: 0.5
+          value_keep: 0.9
 model:
     d_model: 32
     state_dim: 16
@@ -39,18 +50,8 @@ optimizer:
 trainer:
     accelerator: cpu
     cpu_threads: 4
-    max_epochs: 2
     limit_train_batches: 2
     limit_val_batches: 1
     limit_test_batches: 2
     gradient_clip_val: 1.0
     evaluation_batches: 2
-observation_schedule:
-    - start_epoch: 0
-      cycle_fraction: 1.0
-      segment_fraction: 1.0
-      value_keep: 1.0
-    - start_epoch: 1
-      cycle_fraction: 0.5
-      segment_fraction: 0.5
-      value_keep: 0.9

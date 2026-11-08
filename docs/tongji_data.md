@@ -68,70 +68,17 @@ rest schedule. BatteryLife's upstream time normalization may compress gaps;
 
 ## PyTorch sampling
 
-```python
-from torch.utils.data import DataLoader
-from src.data import TongjiDataset, collate_tongji
-
-train = TongjiDataset(
-    'data/processed/tongji_v1', cell_ids=['Tongji1_CY25-025_1--1'],
-    samples_per_cell=128, history_cycles=(1, 8), segment_points=(16, 128),
-    horizon=32, max_anchor_cycle=100,
-    channel_mask_probability=0.0, seed=42,
-)
-loader = DataLoader(train, batch_size=4, collate_fn=collate_tongji,
-                    num_workers=0)
-batch = next(iter(loader))
-```
-
-An index selects a cell/view slot. Training calls draw new views; slots are not
-independent cells. A random anchor k is always included, and earlier eligible
-cycles are sampled without replacement. Each selected cycle yields one contiguous
-random charge segment. Minimum segment size is enforced; cells with no eligible
-anchor produce a clear error. `max_anchor_cycle=None` removes the early-cycle cap.
-
-Future targets are exactly cycle IDs k+1..k+H. Missing source records, unreliable
-SOH, and out-of-range future labels have `target_valid=False` and finite zero
-placeholders. At least one future label must be valid. Targets use full discharge
-records; input extraction never uses future measured curves. Future protocols
-repeat the known cell protocol; history protocols also cover unobserved cycles
-between selected observations. This implementation is for constant-protocol Tongji
-experiments, not arbitrary changing real-world operating conditions.
-
-Batch values have shape `(B,Nmax,Tmax,5)`, padded only to local batch maxima.
-
-* `point_valid (B,N,T)`: real point versus PAD.
-* `value_valid (B,N,T,5)`: source measurement exists and is finite.
-* `value_visible (B,N,T,5)`: this augmentation permits the measurement.
-
-With channel augmentation disabled, visibility is True at every genuine point,
-even where a natural measurement is missing. Optional augmentation hides entire
-channels independently per segment; hidden numerical values are scrubbed to 0.
-PAD has zero values and all three masks False. The model must distinguish real
-unknown measurements (UNK embedding) from PAD (excluded from attention/pooling).
-`cycle_valid = point_valid.any(-1)` is derived. There are no embeddings in this
-Dataset; learn them in the model.
-
-`history_u_valid`, `future_u_valid`, `static_valid`, and `target_valid` describe
-availability in their own arrays, not randomized augmentation. History protocols
-are separately padded; invalid entries never contribute. Diagnostic
-`raw_sample_index` and `segment_bounds` are for audit, not intended model inputs.
-
-Use `deterministic=True` for fixed per-index validation/test views. Set epoch with
-`train.set_epoch(epoch)` for reproducible training sequences; if using persistent
-workers, recreate the loader after changing epoch. DataLoader worker seeds are
-respected. `dataset.close()` releases its cached mappings on Windows.
-
-Split by cell before generating views. Same-cell fixed-view validation is useful
-for a smoke run but is not independent-cell generalization. Keep test cells out
-of normalization fitting and model selection. Only consume labels through their
-validity mask; do not expose true end-of-life or the number of remaining recorded
-cycles as model inputs.
-
+Use [the Dataset guide](dataset.md) to build `TongjiTaskDataset`, inspect masks,
+and load variable-length observations. Future labels follow real cycle IDs
+`k+1` through `k+horizon`. Missing records, invalid SOH, and out-of-range cycles
+have `target_valid=False`. Known protocol settings provide the future conditions.
+The diagnostics `raw_sample_index` and `segment_bounds` trace observations
+back to the source.
 
 ## 按预测任务索引与观测课程
 
 [小规模课程配置](../configs/tongji_curriculum_pilot.yaml) 使用两块真实电芯、
-四步 SOH 标签和两个 epoch。带顶层 `observation_schedule` 的训练配置使用
+四步 SOH 标签和两个 epoch。带 `data.observation_schedule` 的训练配置使用
 `TongjiTaskDataset`。`len(dataset)` 是可用的 `(cell_id, last_observed_cycle)` 任务数。
 `dataset[i]` 固定读取 epoch 0 的视图，`dataset[i, 1]` 读取该任务在 epoch 1
 的视图。组 batch 仍使用 `collate_tongji`。
@@ -141,6 +88,11 @@ cycles as model inputs.
 `value_keep: 4` 最多保留四个有效读数。`value_keep: 0.9` 按每个采样点的有效读数数目
 计算保留配额并向下取整。`value_keep: 1.0` 保留全部有效读数，`value_keep: 1` 最多保留一个。
 课程只改变训练输入。训练评估、验证和测试全程使用最后一个阶段的固定视图。
+
+可以用 `TongjiTaskDataset.from_config("configs/tongji_curriculum_pilot.yaml")`
+单独创建 `data.cell_ids.train` 中所有电芯的 Dataset。训练、验证和测试的
+切分由训练入口负责。每组可配置多个电芯。
+完整配置模板见 [config.md](config.md)。
 
 从项目根目录运行以下命令可以检查配置校验、mask、padding 和多进程重放，
 也可以单独跑两轮 CPU pilot。

@@ -1,4 +1,4 @@
 """Project Lightning callbacks."""
-from .training import RunDiagnostics, StudyProgress
+from .training import RunDiagnostics
 
-__all__ = ["RunDiagnostics", "StudyProgress"]
+__all__ = ["RunDiagnostics"]

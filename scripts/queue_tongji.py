@@ -1,6 +1,6 @@
 """Queue a frozen Tongji experiment with a saved config and source snapshot.
 
-    uv run python scripts/queue_tongji.py --config configs/tongji_smoke.yaml
+    uv run python scripts/queue_tongji.py --config configs/tongji_curriculum_pilot.yaml
 """
 import argparse
 from datetime import datetime, timezone
@@ -46,7 +46,7 @@ def main():
     if args.pueue_config:
         client += ['--config', str(args.pueue_config.resolve())]
     output = subprocess.check_output([*client, 'add', '--print-task-id', '--working-directory',
-                                      str(run_dir/'source'), '--label', 'tongji-single-cell-smoke', '--', command],
+                                      str(run_dir/'source'), '--label', 'tongji-curriculum', '--', command],
                                      text=True, env=clean_environment())
     queued['task_id'] = output.strip()
     write_json(run_dir / 'queued.json', queued)

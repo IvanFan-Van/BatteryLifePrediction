@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def make_model():
-    config = yaml.safe_load((ROOT/'configs/tongji_pilot.yaml').read_text())
+    config = yaml.safe_load((ROOT/'configs/tongji_curriculum_pilot.yaml').read_text())
     normalization = dict(feature_mean=[0.]*5, feature_std=[1.]*5,
                          static_mean=[0.]*3, static_std=[1.]*3,
                          condition_mean=[0.]*4, condition_std=[1.]*4)
@@ -126,17 +126,21 @@ class AttentionModelTests(unittest.TestCase):
                 torch.testing.assert_close(model(batch),restored(batch))
 
     @unittest.skipUnless((ROOT/'data/processed/tongji_v1/manifest.json').exists(),'Preprocessed data required')
-    def test_full_cell_anchor_schedule_and_holdout_split(self):
-        config=yaml.safe_load((ROOT/'configs/tongji_smoke.yaml').read_text())
+    def test_real_cell_anchor_schedule_and_holdout_split(self):
+        config=yaml.safe_load((ROOT/'configs/tongji_curriculum_pilot.yaml').read_text())
         config['data']['root']=str(ROOT/'data/processed/tongji_v1')
         datasets,splits=build_datasets(config)
         try:
-            self.assertFalse(set(splits['train_anchors']) & set(splits['val_anchors']))
-            self.assertGreater(max(splits['train_anchors']),100)
-            train=datasets['train']
-            seen=[train[i]['anchor_cycle'] for i in range(len(train))]
-            self.assertEqual(seen,splits['train_anchors'])
-            self.assertNotEqual(splits['train_cell'],splits['test_cell'])
+            cell_id = splits["train_cells"][0]
+            train_anchors = splits["train_anchors"][cell_id]
+            val_anchors = splits["val_anchors"][cell_id]
+            self.assertFalse(set(train_anchors) & set(val_anchors))
+            self.assertEqual(sorted(train_anchors + val_anchors), [2, 3, 4, 5, 6])
+            train = datasets["train"]
+            self.assertEqual(
+                [train[i, 1]["anchor_cycle"] for i in range(len(train))], train_anchors
+            )
+            self.assertFalse(set(splits["train_cells"]) & set(splits["test_cells"]))
         finally:
             for ds in datasets.values():ds.close()
 

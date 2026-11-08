@@ -1,14 +1,9 @@
-"""Lightning callbacks for gradient checks and study progress."""
-from datetime import datetime, timezone
+"""Lightning callbacks for curriculum training diagnostics."""
 import json
 from pathlib import Path
-import time
 
-import lightning as L
 import torch
 from lightning.pytorch.callbacks import Callback
-
-from src.utils.files import atomic_json
 
 
 class RunDiagnostics(Callback):
@@ -47,27 +42,3 @@ class RunDiagnostics(Callback):
             if key in metrics
         }
         print(f"Epoch {trainer.current_epoch + 1}: {values}", flush=True)
-
-
-class StudyProgress(L.Callback):
-    def __init__(self, run_dir, deadline=None):
-        self.run_dir = Path(run_dir)
-        self.deadline = datetime.fromisoformat(deadline) if deadline else None
-        self.started = None
-        self.durations = []
-
-    def on_train_epoch_start(self, trainer, pl_module):
-        self.started = time.perf_counter()
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        if self.deadline and datetime.now(timezone.utc) >= self.deadline:
-            trainer.fit_loop.min_epochs = 0
-            trainer.should_stop = True
-
-    def on_train_epoch_end(self, trainer, pl_module):
-        self.durations.append(time.perf_counter()-self.started)
-        row = dict(epochs_completed=trainer.current_epoch+1,epoch_seconds=self.durations,
-                   val_cell_mse=float(trainer.callback_metrics['val/cell_mse']),
-                   updated_at=datetime.now(timezone.utc).isoformat())
-        atomic_json(self.run_dir/'progress.json',row)
-        print('PROGRESS',json.dumps({k:v for k,v in row.items() if k!='epoch_seconds'}),flush=True)

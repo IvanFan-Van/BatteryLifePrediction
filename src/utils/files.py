@@ -17,10 +17,3 @@ def write_json(path, value):
     Path(path).write_text(
         json.dumps(value, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-
-
-def atomic_json(path, value):
-    path = Path(path)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    write_json(temporary, value)
-    temporary.replace(path)
