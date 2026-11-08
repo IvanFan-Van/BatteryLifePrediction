@@ -1,23 +1,22 @@
 """Read the observation schedule for the task-indexed Tongji dataset."""
 
-import re
 from dataclasses import dataclass
 
 import yaml
 
 
-def read_percent(value):
-    if not isinstance(value, str) or not re.fullmatch(r"(?:[1-9][0-9]?|100)%", value):
-        raise ValueError(f"Expected a whole percent from '1%' to '100%', got {value!r}")
-    return int(value[:-1])
+def _read_fraction(value, field):
+    if type(value) not in (int, float) or not 0 < value <= 1:
+        raise ValueError(f"{field} must be a fraction in (0, 1], got {value!r}")
+    return float(value)
 
 
 @dataclass(frozen=True)
 class ObservationPhase:
     start_epoch: int
-    cycle_percent: int
-    segment_percent: int
-    value_keep: int | str
+    cycle_fraction: float
+    segment_fraction: float
+    value_keep: int | float
 
 
 @dataclass(frozen=True)
@@ -50,12 +49,16 @@ class ObservationSchedule:
                 if not 1 <= keep <= feature_count:
                     raise ValueError(f"value_keep must be between 1 and {feature_count}")
             else:
-                read_percent(keep)
+                keep = _read_fraction(keep, "value_keep")
 
-            phases.append(ObservationPhase(
-                start, read_percent(item["cycle_fraction"]),
-                read_percent(item["segment_fraction"]), keep,
-            ))
+            phases.append(
+                ObservationPhase(
+                    start_epoch=start,
+                    cycle_fraction=_read_fraction(item["cycle_fraction"], "cycle_fraction"),
+                    segment_fraction=_read_fraction(item["segment_fraction"], "segment_fraction"),
+                    value_keep=keep,
+                )
+            )
             previous_start = start
 
         if phases[0].start_epoch != 0:

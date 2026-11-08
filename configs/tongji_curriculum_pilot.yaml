@@ -47,10 +47,10 @@ trainer:
     evaluation_batches: 2
 observation_schedule:
     - start_epoch: 0
-      cycle_fraction: 100%
-      segment_fraction: 100%
-      value_keep: 100%
+      cycle_fraction: 1.0
+      segment_fraction: 1.0
+      value_keep: 1.0
     - start_epoch: 1
-      cycle_fraction: 50%
-      segment_fraction: 50%
-      value_keep: 90%
+      cycle_fraction: 0.5
+      segment_fraction: 0.5
+      value_keep: 0.9

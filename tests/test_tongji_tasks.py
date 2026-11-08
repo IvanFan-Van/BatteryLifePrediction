@@ -25,13 +25,13 @@ trainer:
   max_epochs: 2
 observation_schedule:
   - start_epoch: 0
-    cycle_fraction: "100%"
-    segment_fraction: "100%"
-    value_keep: "100%"
+    cycle_fraction: 1.0
+    segment_fraction: 1.0
+    value_keep: 1.0
   - start_epoch: 1
-    cycle_fraction: "50%"
-    segment_fraction: "50%"
-    value_keep: "90%"
+    cycle_fraction: 0.5
+    segment_fraction: 0.29
+    value_keep: 0.9
 """
 
 
@@ -39,7 +39,7 @@ class TongjiTaskTests(unittest.TestCase):
     def test_config_validation_and_channel_counts(self):
         config = yaml.safe_load(CONFIG)
         channels = np.ones((2, 6), dtype=bool)
-        for keep, expected in (("90%", 5), (4, 4), ("100%", 6)):
+        for keep, expected in ((0.9, 5), (4, 4), (1.0, 6)):
             with self.subTest(keep=keep):
                 config["observation_schedule"][0]["value_keep"] = keep
                 schedule = ObservationSchedule.from_config(config, feature_count=6)
@@ -47,13 +47,27 @@ class TongjiTaskTests(unittest.TestCase):
                                          np.random.default_rng(42))
                 np.testing.assert_array_equal(visible.sum(axis=1), [expected, expected])
 
-        for invalid in (0, 7, 4.0, True, "90.0%", "101%"):
+        for invalid in (0, 0.0, 7, 4.0, True, float("nan"), "0.9", "90.0%", "101%"):
             with self.subTest(invalid=invalid):
                 config["observation_schedule"][0]["value_keep"] = invalid
                 with self.assertRaises(ValueError):
                     ObservationSchedule.from_config(config, feature_count=6)
 
         config = yaml.safe_load(CONFIG)
+        phase = ObservationSchedule.from_config(config, feature_count=5).for_epoch(1)
+        self.assertEqual(phase.cycle_fraction, 0.5)
+        self.assertEqual(phase.segment_fraction, 0.29)
+
+        for field in ("cycle_fraction", "segment_fraction", "value_keep"):
+            with self.subTest(field=field):
+                invalid_config = yaml.safe_load(CONFIG)
+                invalid_config["observation_schedule"][1][field] = "90%"
+                with self.assertRaisesRegex(ValueError, field):
+                    ObservationSchedule.from_config(invalid_config, feature_count=5)
+
+        channels = np.ones((1, 100), dtype=bool)
+        self.assertEqual(sample_visible(channels, 0.29, np.random.default_rng(42)).sum(), 29)
+
         config["observation_schedule"][1]["start_epoch"] = 0
         with self.assertRaises(ValueError):
             ObservationSchedule.from_config(config, feature_count=5)
@@ -64,7 +78,7 @@ class TongjiTaskTests(unittest.TestCase):
             cell = root / "cells" / "A"
             cell.mkdir(parents=True)
             ids = np.array([2, 4, 5, 6, 9], dtype=np.int64)
-            lengths = [3, 6, 5, 8, 2]
+            lengths = [3, 6, 5, 100, 2]
             values = np.ones((sum(lengths), 5), dtype=np.float32)
             valid = np.ones_like(values, dtype=bool)
             valid[:, 4] = False
@@ -94,7 +108,7 @@ class TongjiTaskTests(unittest.TestCase):
                 self.assertEqual(full["cycle_id"].tolist(), [2, 4, 5, 6])
                 self.assertEqual(len(sparse["cycle_id"]), 2)
                 self.assertEqual(sparse["cycle_id"][-1].item(), 6)
-                self.assertEqual(len(sparse["values"][-1]), 4)
+                self.assertEqual(len(sparse["values"][-1]), 29)
                 self.assertEqual(sparse["target_cycle_id"].tolist(), [7, 8, 9])
                 self.assertEqual(sparse["target_valid"].tolist(), [False, False, True])
                 for field in ("target_cycle_id", "target_soh", "target_valid"):

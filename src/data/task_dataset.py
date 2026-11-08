@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import math
+from fractions import Fraction
 
 import numpy as np
 import torch
@@ -10,7 +12,6 @@ from torch.utils.data import Dataset, Sampler
 from src.utils.files import read_json
 from src.utils.paths import processed_data_path
 
-from .observation import read_percent
 from .tongji import load_cell, tensor
 
 
@@ -19,7 +20,10 @@ def sample_visible(valid, keep, rng):
     if type(keep) is int:
         count = np.minimum(available, keep)
     else:
-        count = available * read_percent(keep) // 100
+        # Exact decimal rounding at quota boundaries such as 100 * 0.29.
+        fraction = Fraction(str(keep))
+        quota = np.array([math.floor(n * fraction) for n in range(valid.shape[1] + 1)])
+        count = quota[available]
 
     if np.array_equal(count, available):
         return valid.copy()
@@ -123,7 +127,7 @@ class TongjiTaskDataset(Dataset):
         anchor_row = int(np.searchsorted(ids, k))
         previous = np.flatnonzero(np.diff(offsets[: anchor_row + 1]) > 0)
         eligible_count = len(previous) + 1
-        count = (eligible_count * phase.cycle_percent + 99) // 100
+        count = math.ceil(eligible_count * Fraction(str(phase.cycle_fraction)))
         selected = rng.choice(previous, size=count - 1, replace=False)
         rows = sorted([*selected, anchor_row])
 
@@ -138,10 +142,11 @@ class TongjiTaskDataset(Dataset):
             raw_sample_index=[],
             segment_bounds=[],
         )
+        segment_fraction = Fraction(str(phase.segment_fraction))
         for row in rows:
             start, stop = offsets[row : row + 2]
             total = int(stop - start)
-            length = max(1, total * phase.segment_percent // 100)
+            length = max(1, math.floor(total * segment_fraction))
             left = int(rng.integers(0, total - length + 1))
             part = slice(start + left, start + left + length)
 
