@@ -9,7 +9,7 @@ import json
 import os
 import socket
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -21,19 +21,26 @@ import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger, WandbLogger
 
+from src.callbacks import RunDiagnostics
+from src.data import TongjiTaskSampler
 from src.data.loading import (
     build_datasets,
     fit_normalization,
     make_loader,
     vocabulary_sizes,
 )
+from src.utils.files import read_json, read_yaml, write_json
+from src.utils.paths import (
+    CONFIGS_DIR,
+    OUTPUTS_DIR,
+    PROJECT_ROOT,
+    processed_data_path,
+    run_path,
+)
+from src.utils.snapshot import copy_source, source_manifest
+
 from .evaluation import evaluate, plot_results
 from .module import BatteryTrajectoryModule
-
-from src.callbacks import RunDiagnostics
-from src.utils.files import read_json, read_yaml, write_json
-from src.utils.paths import CONFIGS_DIR, OUTPUTS_DIR, PROJECT_ROOT, processed_data_path, run_path
-from src.utils.snapshot import copy_source, source_manifest
 
 
 def main():
@@ -46,6 +53,8 @@ def main():
         "--resume", type=Path, help="Existing run directory with checkpoints/last.ckpt"
     )
     args = parser.parse_args()
+
+    # 根据是否 resume 配置 config, run_dir, ckpt_path
     if args.resume:
         run_dir = run_path(args.resume)
         config = read_yaml(run_dir / "config.yaml")
@@ -53,12 +62,10 @@ def main():
         if not Path(ckpt_path).is_file():
             raise FileNotFoundError(ckpt_path)
     else:
+        run_id = datetime.now(UTC).strftime("%Y%m%d-%H%M%S-") + uuid4().hex[:6]
+        run_dir = args.run_dir.resolve() if args.run_dir else (OUTPUTS_DIR / run_id)
         config = read_yaml(args.config)
         config["data"]["root"] = str(processed_data_path(config["data"]["root"]))
-        run_id = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-") + uuid4().hex[:6]
-        run_dir = (
-            args.run_dir.resolve() if args.run_dir else (OUTPUTS_DIR / run_id)
-        )
         if run_dir.exists():
             if not (run_dir / "queued.json").is_file():
                 raise FileExistsError(run_dir)
@@ -75,7 +82,11 @@ def main():
     os.environ["WANDB_SILENT"] = "true"
     if config["trainer"]["accelerator"] == "cpu":
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    elif os.name != "nt" and "farady" in socket.gethostname().lower() and os.environ.get("CUDA_VISIBLE_DEVICES") not in ["2", "3", "2,3", "3,2"]:
+    elif (
+        os.name != "nt"
+        and "farady" in socket.gethostname().lower()
+        and os.environ.get("CUDA_VISIBLE_DEVICES") not in ["2", "3", "2,3", "3,2"]
+    ):
         raise ValueError(
             "farady GPU runs require explicit CUDA_VISIBLE_DEVICES selecting physical GPU 2/3"
         )
@@ -98,7 +109,9 @@ def main():
     if not args.resume:
         try:
             git_commit = subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], cwd=PROJECT_ROOT, text=True,
+                ["git", "rev-parse", "HEAD"],
+                cwd=PROJECT_ROOT,
+                text=True,
                 stderr=subprocess.DEVNULL,
             ).strip()
         except (OSError, subprocess.CalledProcessError):
@@ -161,6 +174,15 @@ def main():
         k: make_loader(v, config, shuffle=(k == "train")) for k, v in datasets.items()
     }
     try:
+        train_sampler = loaders["train"].sampler
+        if args.resume and isinstance(train_sampler, TongjiTaskSampler):
+            previous = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            # Lightning can prefetch before calling set_epoch on the resumed sampler.
+            next_epoch = int(previous["epoch"]) + 1
+            train_sampler.set_epoch(
+                min(next_epoch, config["trainer"]["max_epochs"] - 1)
+            )
+            del previous
         trainer.fit(
             module,
             train_dataloaders=loaders["train"],

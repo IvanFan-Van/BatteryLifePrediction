@@ -126,3 +126,25 @@ for a smoke run but is not independent-cell generalization. Keep test cells out
 of normalization fitting and model selection. Only consume labels through their
 validity mask; do not expose true end-of-life or the number of remaining recorded
 cycles as model inputs.
+
+
+## 按预测任务索引与观测课程
+
+[小规模课程配置](../configs/tongji_curriculum_pilot.yaml) 使用两块真实电芯、
+四步 SOH 标签和两个 epoch。带顶层 `observation_schedule` 的训练配置使用
+`TongjiTaskDataset`。`len(dataset)` 是可用的 `(cell_id, last_observed_cycle)` 任务数。
+`dataset[i]` 固定读取 epoch 0 的视图，`dataset[i, 1]` 读取该任务在 epoch 1
+的视图。组 batch 仍使用 `collate_tongji`。
+
+循环配额向上取整，并始终保留最后观测循环。连续片段的长度向下取整，至少保留一个点。
+`value_keep` 接受 schema 范围内的整数或整百分比字符串。整数 `4` 最多保留四个
+有效读数。百分比 `"90%"` 按每个采样点的有效读数数目向下取整，再随机选择对应数量的通道。
+课程只改变训练输入。训练评估、验证和测试全程使用最后一个阶段的固定视图。
+
+从项目根目录运行以下命令可以检查配置校验、mask、padding 和多进程重放，
+也可以单独跑两轮 CPU pilot。
+
+~~~powershell
+uv run --locked python -m unittest discover -s tests -p test_tongji_tasks.py -v
+uv run --locked python -m src.core.train --config configs/tongji_curriculum_pilot.yaml
+~~~
