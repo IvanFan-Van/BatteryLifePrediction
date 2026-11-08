@@ -1,30 +1,30 @@
 name: tongji-ablation-pipeline-pilot
 base_config: configs/tongji_smoke.yaml
 accelerator: gpu
-gpu_ids: '0'
+gpu_ids: "0"
 parallel: 2
 cpu_threads: 4
 split_seed: 2026
 search_seed: 42
 learning_rates:
-- 0.001
+    - 0.001
 weight_decays:
-- 0.0001
+    - 0.0001
 coarse_epochs: 1
 refine_top_k: 1
 refine_epochs: 1
 final_epochs: 1
 final_seeds:
-- 42
+    - 42
 patience: 5
-deadline_local: '2026-11-05T08:00:00+08:00'
+deadline_local: "2026-11-05T08:00:00+08:00"
 data_overrides:
-  batch_size: 32
-  num_workers: 0
-  cache_size: 128
-  max_anchor_cycle: null
+    batch_size: 32
+    num_workers: 0
+    cache_size: 128
+    max_anchor_cycle: null
 trainer_overrides:
-  limit_train_batches: 2
-  limit_val_batches: 2
-  evaluation_batches: 2
+    limit_train_batches: 2
+    limit_val_batches: 2
+    evaluation_batches: 2
 poll_seconds: 2
