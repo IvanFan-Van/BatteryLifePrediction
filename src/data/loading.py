@@ -1,5 +1,7 @@
-"""Cell-level selection, explicit anchor splits, and training-only scaling."""
+"""Cell-level selection, explicit task splits, and training-only scaling."""
+
 from functools import partial
+from typing import TypedDict
 
 import numpy as np
 from torch.utils.data import DataLoader
@@ -16,10 +18,12 @@ from src.utils.paths import processed_data_path
 
 def fit_normalization(root, training_cell_ids):
     """Fit on training cells only, never on SOH or the held-out test cell."""
-    cells_dir = processed_data_path(root) / 'cells'
-    groups = [('feature', 'values', 'value_valid'),
-              ('static', 'static_numeric', 'static_valid'),
-              ('condition', 'conditions', 'conditions_valid')]
+    cells_dir = processed_data_path(root) / "cells"
+    groups = [
+        ("feature", "values", "value_valid"),
+        ("static", "static_numeric", "static_valid"),
+        ("condition", "conditions", "conditions_valid"),
+    ]
     result = {}
     for prefix, key, valid_key in groups:
         sums = squares = counts = None
@@ -27,35 +31,50 @@ def fit_normalization(root, training_cell_ids):
             cell = load_cell(cells_dir / cell_id)
             x = np.asarray(cell[key], dtype=np.float64)
             valid = np.asarray(cell[valid_key])
-            if prefix == 'static':
+            if prefix == "static":
                 x = x[None]
-                valid = valid[-x.shape[-1]:][None]
+                valid = valid[-x.shape[-1] :][None]
             safe = np.where(valid, x, 0)
             if sums is None:
-                sums = np.zeros(x.shape[-1]); squares = sums.copy(); counts = sums.copy()
+                sums = np.zeros(x.shape[-1])
+                squares = sums.copy()
+                counts = sums.copy()
             sums += safe.sum(axis=0)
             squares += (safe * safe).sum(axis=0)
             counts += valid.sum(axis=0)
+        if sums is None or squares is None or counts is None:
+            raise ValueError("Normalization requires at least one training cell")
         mean = sums / np.maximum(counts, 1)
         variance = np.maximum(squares / np.maximum(counts, 1) - mean**2, 0)
         std = np.sqrt(variance)
         std[std < 1e-6] = 1.0
-        result[f'{prefix}_mean'] = mean.tolist()
-        result[f'{prefix}_std'] = std.tolist()
+        result[f"{prefix}_mean"] = mean.tolist()
+        result[f"{prefix}_std"] = std.tolist()
     return result
 
 
-def _split_anchors(anchors, ratio, rng):
-    if not 0 < ratio < 1:
-        raise ValueError("val_ratio must be between 0 and 1")
-    shuffled = rng.permutation(anchors)
-    nval = max(1, round(len(anchors) * ratio))
-    if nval >= len(anchors):
-        raise ValueError("Not enough anchors for train/validation split")
-    return sorted(shuffled[nval:].tolist()), sorted(shuffled[:nval].tolist())
+class TaskSplits(TypedDict):
+    train_cells: list[str]
+    val_cells: list[str]
+    test_cells: list[str]
+    train_cycle_positions: dict[str, list[int]] | None
+    val_cycle_positions: dict[str, list[int]] | None
+    note: str
 
 
-def build_datasets(config, saved_splits=None):
+def _split_cycle_positions(cycle_positions, val_task_fraction, rng):
+    if not 0 < val_task_fraction < 1:
+        raise ValueError("val_task_fraction must be between 0 and 1")
+    shuffled = rng.permutation(cycle_positions)
+    val_count = max(1, round(len(cycle_positions) * val_task_fraction))
+    if val_count >= len(cycle_positions):
+        raise ValueError("Not enough tasks for train/validation split")
+    return sorted(shuffled[val_count:].tolist()), sorted(shuffled[:val_count].tolist())
+
+
+def build_datasets(
+    config, saved_splits: TaskSplits | None = None
+) -> tuple[dict[str, TongjiTaskDataset], TaskSplits]:
     data = config["data"]
     if "observation_schedule" not in data:
         raise ValueError("Tongji training requires data.observation_schedule")
@@ -92,45 +111,55 @@ def build_datasets(config, saved_splits=None):
         "test_cells": test_cells,
     }
     if saved_splits is None:
-        train_anchors = val_anchors = None
+        train_cycle_positions = val_cycle_positions = None
         if independent_val:
             note = "Disjoint train, validation and test cells."
         else:
-            train_anchors, val_anchors = {}, {}
+            train_cycle_positions, val_cycle_positions = {}, {}
             rng = np.random.default_rng(data["split_seed"])
             candidate = make_dataset(cell_ids=train_cells)
             try:
                 for cell_id in train_cells:
-                    train_anchors[cell_id], val_anchors[cell_id] = _split_anchors(
-                        candidate.anchor_cycles(cell_id), data["val_ratio"], rng
+                    train_cycle_positions[cell_id], val_cycle_positions[cell_id] = _split_cycle_positions(
+                        candidate.cycle_positions(cell_id), data["val_task_fraction"], rng
                     )
             finally:
                 candidate.close()
-            note = "Same-cell held-out anchors. Historical observations and future labels may overlap."
-        saved_splits = dict(
-            cells, train_anchors=train_anchors, val_anchors=val_anchors, note=note
-        )
+            note = "Same-cell held-out cycle positions. Historical observations and future labels may overlap."
+        saved_splits = {
+            "train_cells": train_cells,
+            "val_cells": val_cells,
+            "test_cells": test_cells,
+            "train_cycle_positions": train_cycle_positions,
+            "val_cycle_positions": val_cycle_positions,
+            "note": note,
+        }
     else:
         if any(saved_splits.get(key) != value for key, value in cells.items()):
             raise ValueError("Configured cell lists differ from the saved splits")
-        train_anchors = saved_splits["train_anchors"]
-        val_anchors = saved_splits["val_anchors"]
-        if not independent_val and any(
-            set(train_anchors[cell_id]) & set(val_anchors[cell_id])
-            for cell_id in train_cells
-        ):
-            raise ValueError("Train and validation anchor IDs overlap")
+        train_cycle_positions = saved_splits["train_cycle_positions"]
+        val_cycle_positions = saved_splits["val_cycle_positions"]
+        if not independent_val:
+            if train_cycle_positions is None or val_cycle_positions is None:
+                raise ValueError("Saved splits must include train and validation cycle positions")
+            if any(
+                set(train_cycle_positions[cell_id]) & set(val_cycle_positions[cell_id])
+                for cell_id in train_cells
+            ):
+                raise ValueError("Train and validation cycle positions overlap")
 
-    eval_seed = data["eval_seed"]
+    make_eval_dataset = partial(make_dataset, seed=data["eval_seed"], samples_per_task=1)
     return {
-        "train": make_dataset(cell_ids=train_cells, anchor_cycle_ids=train_anchors),
-        "train_eval": make_dataset(
-            cell_ids=train_cells, anchor_cycle_ids=train_anchors, seed=eval_seed
+        "train": make_dataset(
+            cell_ids=train_cells, cycle_positions_by_cell=train_cycle_positions
         ),
-        "val": make_dataset(
-            cell_ids=val_cells, anchor_cycle_ids=val_anchors, seed=eval_seed
+        "train_eval": make_eval_dataset(
+            cell_ids=train_cells, cycle_positions_by_cell=train_cycle_positions
         ),
-        "test": make_dataset(cell_ids=test_cells, seed=eval_seed),
+        "val": make_eval_dataset(
+            cell_ids=val_cells, cycle_positions_by_cell=val_cycle_positions
+        ),
+        "test": make_eval_dataset(cell_ids=test_cells),
     }, saved_splits
 
 
@@ -147,6 +176,7 @@ def make_loader(dataset, config, shuffle=False):
         sampler=sampler,
         num_workers=data["num_workers"],
         collate_fn=collate_tongji,
+        drop_last=False,
         persistent_workers=False,
     )
 

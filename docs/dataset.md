@@ -16,11 +16,11 @@ from src.data import TongjiTaskDataset
 
 config_path = "configs/tongji_curriculum_pilot.yaml"
 dataset = TongjiTaskDataset.from_config(config_path)
-print(len(dataset), dataset.max_epochs)
+print("任务数", len(dataset.tasks), "每轮样本数", len(dataset))
 ```
 
 `from_config` 默认选取 `data.cell_ids.train` 里的全部电芯，并读取
-`data.root`、`data.horizon`、`data.max_last_observed_cycle`、
+`data.root`、`data.forecast_horizon_cycles`、`data.max_cycle_position`、`data.samples_per_task`、
 `data.max_epochs`、`data.observation_schedule` 和顶层的 `seed`。
 构造得到的是这些电芯的所有合格预测任务。需要应用训练、验证和测试切分时，
 使用后面的 `build_datasets` 示例。
@@ -28,7 +28,7 @@ print(len(dataset), dataset.max_epochs)
 ### 2. 传入已读取的配置字典
 
 这种方式适合在 Notebook 里复用配置，再指定要检查的电芯或预测起点。
-下面只读取测试电芯的第 4 和第 6 轮，随机种子使用 `data.eval_seed`。
+下面只读取测试电芯的第 4 和第 6 条循环记录，随机种子使用 `data.eval_seed`。
 
 ```python
 from src.utils.files import read_yaml
@@ -39,15 +39,15 @@ cell_id = "Tongji1_CY25-025_1--5"
 subset = TongjiTaskDataset.from_config(
     config,
     cell_ids=[cell_id],
-    anchor_cycle_ids={cell_id: [4, 6]},
+    cycle_positions_by_cell={cell_id: [4, 6]},
     seed=config["data"]["eval_seed"],
 )
 print(subset.tasks)
 subset.close()
 ```
 
-`cell_ids` 接受多个电芯 ID。传入 `anchor_cycle_ids` 时，需要为每个选中的
-电芯提供一组真实循环编号。也可以把这些覆盖参数直接和 YAML 路径一起传给
+`cell_ids` 接受多个电芯 ID。传入 `cycle_positions_by_cell` 时，需要为每个选中的
+电芯提供一组从 1 开始的循环位置。也可以把这些覆盖参数直接和 YAML 路径一起传给
 `from_config`。
 
 ### 3. 直接传入构造参数
@@ -58,8 +58,9 @@ subset.close()
 direct = TongjiTaskDataset(
     root="data/processed/tongji_v1",
     cell_ids=["Tongji1_CY25-025_1--4"],
-    horizon=4,
-    max_last_observed_cycle=6,
+    forecast_horizon_cycles=4,
+    max_cycle_position=6,
+    samples_per_task=3,
     max_epochs=1,
     observation_schedule=[
         {
@@ -79,9 +80,10 @@ direct.close()
 | --- | --- |
 | `root` | 处理后的数据目录。相对路径从运行时的工作目录解析。 |
 | `cell_ids` | 电芯 ID 集合，至少包含一个电芯，且 ID 不能重复。 |
-| `horizon` | 预测未来多少轮 SOH，默认 32。 |
-| `max_last_observed_cycle` | 最后观测循环的真实编号上限，包含上限本身。默认 `None`。 |
-| `anchor_cycle_ids` | 可选的起点白名单，格式为 `{cell_id: [cycle_id, ...]}`。 |
+| `forecast_horizon_cycles` | 预测未来多少轮 SOH，默认 32。 |
+| `max_cycle_position` | 最后观测位置的上限。`50` 表示只观察前 50 条记录。默认 `None`。 |
+| `cycle_positions_by_cell` | 可选的任务位置筛选，格式为 `{cell_id: [position, ...]}`。 |
+| `samples_per_task` | 每个任务每轮的样本数，默认 1。`from_config` 也可显式覆盖 YAML 中的值。 |
 | `max_epochs` | 可取样的 epoch 总数，合法索引为 `0` 到 `max_epochs - 1`。 |
 | `observation_schedule` | 按 `start_epoch` 排序的阶段配置，第一个阶段从 epoch 0 开始。 |
 | `seed` | 观测视图的随机种子，直接构造时默认 42。 |
@@ -94,46 +96,79 @@ direct.close()
 
 ## 查看任务与样本
 
-一个任务由 `(cell_id, last_observed_cycle)` 标识。`len(dataset)` 是任务数，
-`dataset.tasks[i]` 是第 `i` 项任务，`anchor_cycles(cell_id)` 返回该电芯
-的可用预测起点。一个起点必须有可用的充电采样点，并且之后 `horizon` 轮内
-至少有一个有效 SOH 标签。
+一个任务由 `(cell_id, last_cycle_position)` 标识。每个电芯的循环按真实编号
+排序后，从 1 开始确定位置。空充电片段和不合格的任务不会改变其他循环的位置。
+例如，真实循环号为 `[4, 6, 7, 10]` 时，位置 `3` 对应编号 `7`。配置
+`max_cycle_position: 3` 时，编号 `10` 的记录仍可提供 SOH 标签。
 
-`dataset[i]` 使用 epoch 0，`dataset[i, epoch]` 使用指定 epoch。
-同一任务和 epoch 在相同配置、数据和 seed 下可以重放。换 epoch 时，抽中的
-历史循环、片段和读数可能变化。标签始终对齐到真实循环号
-`last_observed_cycle + 1` 至 `last_observed_cycle + horizon`。
+| API | 含义 |
+| --- | --- |
+| `dataset.tasks[task_position]` | 任务表的一项。Python 下标 `task_position` 从 0 开始。 |
+| `dataset.cycle_positions(cell_id)` | 该电芯在当前 Dataset 中可用的最后观测位置。任务需要有充电采样点和至少一个有效未来标签。 |
+| `len(dataset.tasks)` | 任务数。 |
+| `len(dataset)` | 一轮样本数，等于任务数乘以 `dataset.samples_per_task`。 |
+| `dataset[sample_position, epoch]` | 指定 epoch 的一份样本。`dataset[sample_position]` 默认使用 epoch 0。 |
+
+样本下标从 0 开始。用 `divmod(sample_position, dataset.samples_per_task)`
+得到任务下标和任务内的观测下标。例如，每个任务有 100 份观测时，
+`dataset[137, 2]` 读取 epoch 2、任务下标 1、观测下标 37。
+在相同配置、数据和 seed 下，相同索引可以重放。改变观测下标或 epoch
+可以生成另一份随机观测，同一任务的 SOH 标签保持相同。标签按真实循环号
+对齐，从 `last_cycle_id + 1` 到 `last_cycle_id + forecast_horizon_cycles`。
 
 ```python
 import torch
 
 train_cell = "Tongji1_CY25-025_1--4"
-i = dataset.tasks.index((train_cell, 6))
-full = dataset[i]
-sparse = dataset[i, 1]
+task_position = dataset.tasks.index((train_cell, 6))
+sample_position = task_position * dataset.samples_per_task
+full = dataset[sample_position]
+sparse = dataset[sample_position, 1]
 
-print(dataset.anchor_cycles(train_cell))
+print(dataset.cycle_positions(train_cell))
+print(sparse["last_cycle_position"], sparse["last_cycle_id"])
 print(full["cycle_id"].tolist(), sparse["cycle_id"].tolist())
 print(sparse["segment_bounds"].tolist())
 print([tuple(segment.shape) for segment in sparse["values"]])
-print(sparse["target_cycle_id"][sparse["target_valid"]])
-print(sparse["target_soh"][sparse["target_valid"]])
+print(sparse["target_cycle_id"][sparse["target_soh_valid"]])
+print(sparse["target_soh"][sparse["target_soh_valid"]])
 
 torch.testing.assert_close(full["target_cycle_id"], sparse["target_cycle_id"])
 torch.testing.assert_close(full["target_soh"], sparse["target_soh"])
-torch.testing.assert_close(full["target_valid"], sparse["target_valid"])
-torch.testing.assert_close(sparse["value_visible"], dataset[i, 1]["value_visible"])
+torch.testing.assert_close(full["target_soh_valid"], sparse["target_soh_valid"])
+torch.testing.assert_close(sparse["value_visible"], dataset[sample_position, 1]["value_visible"])
 ```
 
-| 字段 | 如何解读 |
-| --- | --- |
-| `cell_id`、`anchor_cycle` | 电芯 ID 和最后观测轮的真实编号。 |
-| `cycle_id`、`values` | 抽中的循环号和对应的充电片段。每个片段形状为 `(T_i, F)`，当前 Tongji 有五个通道。 |
-| `value_valid`、`value_visible` | 前者标记原始有效读数，后者标记本次保留的读数。形状与各片段的 `values` 一致。 |
-| `time_in_cycle` | 每个采样点相对完整循环起点的秒数。 |
-| `segment_bounds`、`raw_sample_index` | 前者是处理后单轮充电片段内的左闭右开边界，后者用于回查原始循环数组。 |
-| `static_*`、`history_*`、`future_u*` | 电芯静态属性、历史工况和预测区间的已知工况，以及对应的可用性。 |
-| `target_cycle_id`、`target_soh`、`target_valid` | 长度为 `horizon` 的目标编号、SOH 和标签有效性。计算误差时只使用 `target_valid` 为真的位置。 |
+| 字段 | Batch 形状 | 如何解读 |
+| --- | --- | --- |
+| `cell_id` | 长度 `B` 的列表 | 电芯 ID。 |
+| `last_cycle_position` | `(B,)` | 最后观测循环的位置，从 1 开始。 |
+| `last_cycle_id` | `(B,)` | 最后观测循环的真实编号。 |
+| `cycle_id` | `(B,N)` | 本次抽中的真实循环编号。 |
+| `values` | `(B,N,T,F)` | 每点的电压、电流、充电容量、放电容量和温度。 |
+| `value_valid` | `(B,N,T,F)` | 源数据是否提供了有效读数。 |
+| `value_visible` | `(B,N,T,F)` | 本次观测是否提供该读数。 |
+| `point_valid` | `(B,N,T)` | 是否是真实采样点。 |
+| `cycle_valid` | `(B,N)` | 是否是真实循环片段，由 `point_valid.any(dim=-1)` 得到。 |
+| `time_in_cycle_s` | `(B,N,T)` | 相对完整循环起点的秒数。 |
+| `raw_point_position` | `(B,N,T)` | 原始完整循环中的采样点下标，从 0 开始。 |
+| `segment_bounds` | `(B,N,2)` | 处理后单轮充电数组中的起止下标，左闭右开。 |
+| `static_categorical` | `(B,5)` | 外形、正极、负极、电解液、隔膜的类别 ID。 |
+| `static_numeric` | `(B,3)` | 额定容量、上限电压、下限电压。 |
+| `static_valid` | `(B,8)` | 静态属性是否已知，按类别字段、数值字段排列。 |
+| `history_cycle_id` | `(B,L)` | 历史工况对应的真实循环编号。 |
+| `history_u` | `(B,L,4)` | 历史工况设定。 |
+| `history_u_valid` | `(B,L,4)` | 历史工况设定是否已知。 |
+| `future_u` | `(B,H,4)` | 预测区间的工况设定。 |
+| `future_u_valid` | `(B,H,4)` | 预测区间的工况设定是否已知。 |
+| `target_cycle_id` | `(B,H)` | 预测区间内的真实循环编号。 |
+| `target_soh` | `(B,H)` | SOH 监督标签。 |
+| `target_soh_valid` | `(B,H)` | 是否有有效的 SOH 标签，用于 loss 和指标。 |
+
+`N`、`T` 和 `L` 分别是批内补齐后的循环数、片段点数和历史工况长度。
+`F` 是观测通道数，`H` 是 `forecast_horizon_cycles`。
+单条样本里的充电片段仍为变长数组，`point_valid` 和 `cycle_valid` 在组批时生成。
+工况的四个通道依次为环境温度、充电倍率、放电倍率、充电后静置时长。
 
 ## 用 DataLoader 组 batch
 
@@ -151,7 +186,7 @@ from src.data import collate_tongji
 loader = DataLoader(
     dataset,
     batch_size=2,
-    sampler=[(0, 1), (i, 1)],
+    sampler=[(0, 1), (sample_position, 1)],
     collate_fn=collate_tongji,
     num_workers=0,
 )
@@ -160,39 +195,44 @@ batch = next(iter(loader))
 print(batch["values"].shape)       # (B, N_max, T_max, F)
 print(batch["point_valid"].shape)  # (B, N_max, T_max)
 print(batch["cycle_valid"])       # (B, N_max)
-print(batch["target_soh"].shape)   # (B, horizon)
+print(batch["target_soh"].shape)   # (B, forecast_horizon_cycles)
 
 assert torch.equal(batch["cycle_valid"], batch["point_valid"].any(dim=-1))
 assert not batch["value_visible"][~batch["point_valid"]].any()
 ```
 
 只想手动拼几条样本时，可以直接调用
-`collate_tongji([dataset[0, 1], dataset[i, 1]])`。
+`collate_tongji([dataset[0, 1], dataset[sample_position, 1]])`。
 
 ### 随 epoch 切换观测日程
 
-独立 PyTorch 循环可以用 `TongjiTaskSampler`。它按 epoch 打乱任务顺序，
-每个任务在一轮完整遍历中访问一次，并把 `(index, epoch)` 交给 Dataset。
-在开始遍历 DataLoader 前调用 `set_epoch`。使用 sampler 时，由 sampler
-决定顺序，DataLoader 保持 `shuffle=False`。
+独立 PyTorch 循环可以用 `TongjiTaskSampler`。它在每个 epoch 将全部样本
+下标一起打乱，再把 `(sample_position, epoch)` 交给 Dataset。DataLoader
+按这个顺序组批，允许一批只覆盖部分任务。完整遍历且保留尾批时，每个任务恰好
+贡献 `samples_per_task` 份。训练配置的 `trainer.limit_train_batches`
+可以提前截断本轮。在开始遍历前调用 `set_epoch`，并让 DataLoader 的
+`shuffle` 使用默认值 `False`。
 
 ```python
 from src.data import TongjiTaskSampler
 
-sampler = TongjiTaskSampler(dataset, seed=config["seed"])
+multi_view_dataset = TongjiTaskDataset.from_config(config, samples_per_task=3)
+sampler = TongjiTaskSampler(multi_view_dataset, seed=config["seed"])
 train_loader = DataLoader(
-    dataset,
+    multi_view_dataset,
     batch_size=config["data"]["batch_size"],
     sampler=sampler,
     collate_fn=collate_tongji,
     num_workers=0,
 )
 
-for epoch in range(dataset.max_epochs):
+for epoch in range(multi_view_dataset.max_epochs):
     sampler.set_epoch(epoch)
     for batch in train_loader:
         # 在这里调用模型并计算 loss。
-        assert batch["target_valid"].any(dim=-1).all()
+        assert batch["target_soh_valid"].any(dim=-1).all()
+
+multi_view_dataset.close()
 ```
 
 如果想顺序遍历一个固定阶段，可以传
@@ -222,7 +262,7 @@ finally:
         split_dataset.close()
 ```
 
-`make_loader` 给验证和测试使用最后一个阶段的固定视图。
+`build_datasets` 给训练评估、验证和测试各保留每任务一份样本。`make_loader` 给这些集合使用最后一个阶段的固定观测。
 在项目的 Lightning 训练入口中，训练 sampler 会收到当前 epoch。
 Notebook 中可以先用 `num_workers=0` 来检查样本。用完后调用
 `dataset.close()` 释放 Dataset 当前缓存的内存映射，在 Windows 上移动或删除

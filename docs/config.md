@@ -13,7 +13,7 @@ data:
     # 数据加载与切分的通用参数。
     batch_size: 2
     num_workers: 0
-    val_ratio: 0.2
+    val_task_fraction: 0.2
     split_seed: 2026
     eval_seed: 2027
 
@@ -22,8 +22,9 @@ data:
     cell_ids:
         train: [Tongji1_CY25-025_1--4]
         test: [Tongji1_CY25-025_1--5]
-    horizon: 4  # 每个任务预测的 SOH 轮数。
-    max_last_observed_cycle: 6  # 真实循环编号。null 表示没有上限。
+    forecast_horizon_cycles: 4  # 每个任务预测的 SOH 轮数。
+    max_cycle_position: 6  # 每个电芯从 1 开始计数。null 表示没有上限。
+    samples_per_task: 1  # 每个训练任务每轮的样本数。
     max_epochs: 2  # 同时用于日程和 Trainer。
 
     # 运行时观测规则，epoch 从 0 开始。
@@ -89,7 +90,7 @@ sample = dataset[0, 1]
 
 训练入口使用 `cell_ids.train` 中的电芯做训练并拟合归一化，用
 `cell_ids.test` 中的独立电芯做测试。每组都可以包含多个电芯。配置
-`cell_ids.val` 时，三组电芯必须两两独立。省略它时，按 `data.val_ratio`
+`cell_ids.val` 时，三组电芯必须两两独立。省略它时，按 `data.val_task_fraction`
 从每块训练电芯划出部分预测起点做验证。此时训练和验证可能共享历史片段或未来标签。
 
 也可以直接传入 Dataset 的参数。
@@ -98,8 +99,9 @@ sample = dataset[0, 1]
 dataset = TongjiTaskDataset(
     root="data/processed/tongji_v1",
     cell_ids=["Tongji1_CY25-025_1--4"],
-    horizon=4,
-    max_last_observed_cycle=6,
+    forecast_horizon_cycles=4,
+    max_cycle_position=6,
+    samples_per_task=1,
     max_epochs=1,
     observation_schedule=[
         dict(start_epoch=0, cycle_fraction=0.5, segment_fraction=0.5, value_keep=0.9),
@@ -109,4 +111,16 @@ dataset = TongjiTaskDataset(
 
 第一个阶段须从 epoch 0 开始，各阶段的 `start_epoch` 依次增加且小于
 `data.max_epochs`。TongjiTaskDataset 的训练总轮数也来自这个字段。
-验证和测试使用最后一个阶段的固定视图。
+训练评估、验证和测试使用最后一个阶段的固定观测，每个任务一份。
+
+## 旧配置迁移
+
+| 旧字段 | 当前字段 |
+| --- | --- |
+| `data.horizon` | `data.forecast_horizon_cycles` |
+| `data.val_ratio` | `data.val_task_fraction` |
+| `data.max_last_observed_cycle` | `data.max_cycle_position` |
+
+第三项需要根据实验设计重新取值。旧值限制真实循环号，新值限制每个电芯的
+循环记录位置。例如循环号从 2 开始且连续时，旧上限 6 对应新位置 5。
+新实验保存的切分按位置记录。历史实验可用原始配置、切分和对应的代码版本恢复。

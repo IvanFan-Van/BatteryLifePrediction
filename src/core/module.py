@@ -30,7 +30,7 @@ class BatteryTrajectoryModule(L.LightningModule):
         prediction = self(batch)
         if not torch.isfinite(prediction).all():
             raise FloatingPointError('Nonfinite trajectory prediction')
-        mse, mae = trajectory_errors(prediction, batch['target_soh'], batch['target_valid'])
+        mse, mae = trajectory_errors(prediction, batch['target_soh'], batch['target_soh_valid'])
         self.log(f'{stage}/mse', mse.mean(), on_step=False, on_epoch=True,
                  batch_size=len(prediction), prog_bar=True)
         self.log(f'{stage}/mae', mae.mean(), on_step=False, on_epoch=True,
@@ -47,5 +47,5 @@ class BatteryTrajectoryModule(L.LightningModule):
         self.shared_step(batch, 'test')
 
     def configure_optimizers(self):
-        cfg = self.hparams.config['optimizer']
+        cfg = self.hparams['config']['optimizer']
         return torch.optim.AdamW(self.parameters(), lr=cfg['lr'], weight_decay=cfg['weight_decay'])

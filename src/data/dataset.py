@@ -128,10 +128,18 @@ def sample_visible(valid, keep, rng):
 
 
 class TongjiTaskDataset(Dataset):
-    """Index tasks by (cell ID, last observed cycle); use (index, epoch) for views."""
+    """Sample observation views for (cell_id, last_cycle_position) tasks."""
 
     @classmethod
-    def from_config(cls, config, *, cell_ids=None, anchor_cycle_ids=None, seed=None):
+    def from_config(
+        cls,
+        config,
+        *,
+        cell_ids=None,
+        cycle_positions_by_cell=None,
+        samples_per_task=None,
+        seed=None,
+    ):
         """Build a dataset from a YAML path or an already loaded config."""
         if not isinstance(config, Mapping):
             config = read_yaml(config)
@@ -143,9 +151,14 @@ class TongjiTaskDataset(Dataset):
             cell_ids=data["cell_ids"]["train"] if cell_ids is None else cell_ids,
             observation_schedule=data["observation_schedule"],
             max_epochs=data["max_epochs"],
-            horizon=data["horizon"],
-            max_last_observed_cycle=data.get("max_last_observed_cycle"),
-            anchor_cycle_ids=anchor_cycle_ids,
+            forecast_horizon_cycles=data["forecast_horizon_cycles"],
+            max_cycle_position=data.get("max_cycle_position"),
+            cycle_positions_by_cell=cycle_positions_by_cell,
+            samples_per_task=(
+                data.get("samples_per_task", 1)
+                if samples_per_task is None
+                else samples_per_task
+            ),
             seed=config["seed"] if seed is None else seed,
         )
 
@@ -156,9 +169,10 @@ class TongjiTaskDataset(Dataset):
         *,
         observation_schedule,
         max_epochs,
-        horizon=32,
-        max_last_observed_cycle=None,
-        anchor_cycle_ids=None,
+        forecast_horizon_cycles=32,
+        max_cycle_position=None,
+        cycle_positions_by_cell=None,
+        samples_per_task=1,
         seed=42,
     ):
         root = processed_data_path(root)
@@ -167,14 +181,20 @@ class TongjiTaskDataset(Dataset):
             raise ValueError("Preprocessing is incomplete")
         known = {cell["cell_id"] for cell in manifest["cells"]}
         if isinstance(cell_ids, str):
-            raise ValueError("cell_ids must be a collection of cell IDs")
+            raise ValueError("cell_ids must be a collection of cell IDs")  # noqa: TRY004
         cell_ids = sorted(cell_ids)
         if not cell_ids or len(cell_ids) != len(set(cell_ids)):
             raise ValueError("cell_ids must be nonempty and unique")
         if not set(cell_ids) <= known:
             raise ValueError(f"Unknown cells: {set(cell_ids) - known}")
-        if type(horizon) is not int or horizon < 1:
-            raise ValueError("horizon must be a positive integer")
+        if type(forecast_horizon_cycles) is not int or forecast_horizon_cycles < 1:
+            raise ValueError("forecast_horizon_cycles must be a positive integer")
+        if max_cycle_position is not None and (
+            type(max_cycle_position) is not int or max_cycle_position < 1
+        ):
+            raise ValueError("max_cycle_position must be a positive integer or null")
+        if type(samples_per_task) is not int or samples_per_task < 1:
+            raise ValueError("samples_per_task must be a positive integer")
 
         self.cells_dir = root / "cells"
         schema = read_json(root / "schema.json")
@@ -183,7 +203,8 @@ class TongjiTaskDataset(Dataset):
             max_epochs=max_epochs,
             feature_count=len(schema["features"]),
         )
-        self.horizon = horizon
+        self.forecast_horizon_cycles = forecast_horizon_cycles
+        self.samples_per_task = samples_per_task
         self.seed = seed
         self._cached_cell_id = None
         self._cached_cell = None
@@ -191,27 +212,32 @@ class TongjiTaskDataset(Dataset):
         tasks = []
         for cell_id in cell_ids:
             cell = load_cell(self.cells_dir / cell_id)
-            ids = cell["cycle_id"]
-            anchors = ids[np.diff(cell["cycle_offsets"]) > 0]
-            valid_targets = ids[cell["soh_valid"]]
-            has_target = np.searchsorted(
-                valid_targets, anchors, side="right"
-            ) < np.searchsorted(valid_targets, anchors + horizon, side="right")
-            eligible = anchors[has_target]
-            if max_last_observed_cycle is not None:
-                eligible = eligible[eligible <= max_last_observed_cycle]
-            if anchor_cycle_ids is not None:
-                requested = set(anchor_cycle_ids[cell_id])
+            cycle_ids = cell["cycle_id"]
+            cycle_positions = np.flatnonzero(np.diff(cell["cycle_offsets"]) > 0) + 1
+            if max_cycle_position is not None:
+                cycle_positions = cycle_positions[cycle_positions <= max_cycle_position]
+
+            candidate_ids = cycle_ids[cycle_positions - 1]
+            valid_target_ids = cycle_ids[cell["soh_valid"]]
+            target_starts = np.searchsorted(valid_target_ids, candidate_ids, side="right")
+            target_ends = np.searchsorted(
+                valid_target_ids, candidate_ids + forecast_horizon_cycles, side="right"
+            )
+            eligible = cycle_positions[target_starts < target_ends].tolist()
+            if cycle_positions_by_cell is not None:
+                requested = set(cycle_positions_by_cell[cell_id])
                 if not requested <= set(eligible):
-                    raise ValueError(f"{cell_id}: requested anchors are not eligible")
-                eligible = [k for k in eligible if k in requested]
-            if len(eligible) == 0:
+                    raise ValueError(f"{cell_id}: requested cycle positions are not eligible")
+                eligible = [position for position in eligible if position in requested]
+            if not eligible:
                 raise ValueError(f"{cell_id}: no eligible forecasting tasks")
-            tasks.extend((cell_id, int(k)) for k in eligible)
+            tasks.extend((cell_id, position) for position in eligible)
         self.tasks = tuple(tasks)
 
-    def anchor_cycles(self, cell_id):
-        return np.array([k for cid, k in self.tasks if cid == cell_id], dtype=np.int64)
+    def cycle_positions(self, cell_id):
+        return np.array(
+            [position for cid, position in self.tasks if cid == cell_id], dtype=np.int64
+        )
 
     def close(self):
         self._cached_cell_id = None
@@ -221,49 +247,60 @@ class TongjiTaskDataset(Dataset):
         return dict(self.__dict__, _cached_cell_id=None, _cached_cell=None)
 
     def _load(self, cell_id):
-        if cell_id != self._cached_cell_id:
-            self._cached_cell = load_cell(self.cells_dir / cell_id)
+        cell = self._cached_cell
+        if cell is None or cell_id != self._cached_cell_id:
+            cell = load_cell(self.cells_dir / cell_id)
+            self._cached_cell = cell
             self._cached_cell_id = cell_id
-        return self._cached_cell
+        return cell
 
     @property
     def max_epochs(self):
         return self._schedule.max_epochs
 
     def __len__(self):
-        return len(self.tasks)
+        return len(self.tasks) * self.samples_per_task
 
     def __getitem__(self, key):
-        index, epoch = key if isinstance(key, tuple) else (key, 0)
-        if not 0 <= index < len(self):
-            raise IndexError(index)
-        cell_id, k = self.tasks[index]
+        sample_position, epoch = key if isinstance(key, tuple) else (key, 0)
+        if not 0 <= sample_position < len(self):
+            raise IndexError(sample_position)
+        task_position, view_position = divmod(sample_position, self.samples_per_task)
+        cell_id, last_cycle_position = self.tasks[task_position]
         phase = self._schedule.for_epoch(epoch)
-        seed_data = json.dumps([self.seed, cell_id, k, epoch]).encode("utf-8")
+
+        cell = self._load(cell_id)
+        cycle_ids = cell["cycle_id"]
+        offsets = cell["cycle_offsets"]
+        last_cycle_row = last_cycle_position - 1
+        last_cycle_id = int(cycle_ids[last_cycle_row])
+
+        seed_parts = [self.seed, cell_id, last_cycle_id, epoch]
+        # The first view uses the original seed components for reproducibility.
+        if view_position:
+            seed_parts.append(view_position)
+        seed_data = json.dumps(seed_parts).encode("utf-8")
         digest = hashlib.blake2b(seed_data, digest_size=8).digest()
         rng = np.random.default_rng(int.from_bytes(digest, "little"))
 
-        cell = self._load(cell_id)
-        ids = cell["cycle_id"]
-        offsets = cell["cycle_offsets"]
-        anchor_row = int(np.searchsorted(ids, k))
-        previous = np.flatnonzero(np.diff(offsets[: anchor_row + 1]) > 0)
-        eligible_count = len(previous) + 1
+        previous_rows = np.flatnonzero(np.diff(offsets[: last_cycle_row + 1]) > 0)
+        eligible_count = len(previous_rows) + 1
         count = math.ceil(eligible_count * Fraction(str(phase.cycle_fraction)))
-        selected = rng.choice(previous, size=count - 1, replace=False)
-        rows = sorted([*selected, anchor_row])
+        selected_rows = rng.choice(previous_rows, size=count - 1, replace=False)
+        rows = sorted([*selected_rows, last_cycle_row])
 
-        sample = dict(
-            cell_id=cell_id,
-            anchor_cycle=k,
-            cycle_id=tensor(ids[rows]),
-            values=[],
-            value_valid=[],
-            value_visible=[],
-            time_in_cycle=[],
-            raw_sample_index=[],
-            segment_bounds=[],
-        )
+        sample = {
+            "cell_id": cell_id,
+            "last_cycle_position": last_cycle_position,
+            "last_cycle_id": last_cycle_id,
+            "cycle_id": tensor(cycle_ids[rows]),
+            "values": [],
+            "value_valid": [],
+            "value_visible": [],
+            "time_in_cycle_s": [],
+            "raw_point_position": [],
+            "segment_bounds": [],
+        }
         segment_fraction = Fraction(str(phase.segment_fraction))
         for row in rows:
             start, stop = offsets[row : row + 2]
@@ -277,16 +314,20 @@ class TongjiTaskDataset(Dataset):
             sample["values"].append(tensor(np.where(visible, cell["values"][part], 0)))
             sample["value_valid"].append(tensor(valid))
             sample["value_visible"].append(tensor(visible))
-            sample["time_in_cycle"].append(tensor(cell["time_in_cycle"][part]))
-            sample["raw_sample_index"].append(tensor(cell["raw_sample_index"][part]))
+            sample["time_in_cycle_s"].append(tensor(cell["time_in_cycle"][part]))
+            sample["raw_point_position"].append(tensor(cell["raw_sample_index"][part]))
             sample["segment_bounds"].append([left, left + length])
 
-        target_ids = k + np.arange(1, self.horizon + 1, dtype=np.int64)
-        positions = np.searchsorted(ids, target_ids).clip(max=len(ids) - 1)
-        target_valid = (ids[positions] == target_ids) & cell["soh_valid"][positions]
-        history_ids = np.arange(int(ids[rows[0]]), k, dtype=np.int64)
-        u = cell["conditions"][anchor_row]
-        u_valid = cell["conditions_valid"][anchor_row]
+        target_ids = last_cycle_id + np.arange(
+            1, self.forecast_horizon_cycles + 1, dtype=np.int64
+        )
+        target_rows = np.searchsorted(cycle_ids, target_ids).clip(max=len(cycle_ids) - 1)
+        target_soh_valid = (
+            (cycle_ids[target_rows] == target_ids) & cell["soh_valid"][target_rows]
+        )
+        history_ids = np.arange(cycle_ids[rows[0]], last_cycle_id, dtype=np.int64)
+        u = cell["conditions"][last_cycle_row]
+        u_valid = cell["conditions_valid"][last_cycle_row]
 
         sample.update(
             segment_bounds=tensor(sample["segment_bounds"]),
@@ -296,17 +337,17 @@ class TongjiTaskDataset(Dataset):
             history_cycle_id=tensor(history_ids),
             history_u=tensor(np.tile(u, (len(history_ids), 1))),
             history_u_valid=tensor(np.tile(u_valid, (len(history_ids), 1))),
-            future_u=tensor(np.tile(u, (self.horizon, 1))),
-            future_u_valid=tensor(np.tile(u_valid, (self.horizon, 1))),
+            future_u=tensor(np.tile(u, (self.forecast_horizon_cycles, 1))),
+            future_u_valid=tensor(np.tile(u_valid, (self.forecast_horizon_cycles, 1))),
             target_cycle_id=tensor(target_ids),
-            target_soh=tensor(np.where(target_valid, cell["soh"][positions], 0)),
-            target_valid=tensor(target_valid),
+            target_soh=tensor(np.where(target_soh_valid, cell["soh"][target_rows], 0)),
+            target_soh_valid=tensor(target_soh_valid),
         )
         return sample
 
 
 class TongjiTaskSampler(Sampler):
-    """Send the epoch with each task so workers can replay views independently."""
+    """Shuffle all sample positions in the epoch and send the epoch to workers."""
 
     def __init__(self, dataset, *, seed=42, fixed_epoch=None):
         self.dataset = dataset
@@ -319,11 +360,11 @@ class TongjiTaskSampler(Sampler):
 
     def __iter__(self):
         if self.fixed_epoch is not None:
-            return ((index, self.fixed_epoch) for index in range(len(self)))
+            return ((position, self.fixed_epoch) for position in range(len(self)))
         epoch = self.epoch
         generator = torch.Generator().manual_seed(self.seed + epoch)
         order = torch.randperm(len(self), generator=generator).tolist()
-        return ((index, epoch) for index in order)
+        return ((position, epoch) for position in order)
 
     def __len__(self):
         return len(self.dataset)
@@ -341,17 +382,17 @@ def collate_tongji(samples):
     n = max(len(s["values"]) for s in samples)
     t = max(len(v) for s in samples for v in s["values"])
     f = samples[0]["values"][0].shape[-1]
-    batch = dict(
-        cell_id=[s["cell_id"] for s in samples],
-        values=torch.zeros(batch_size, n, t, f),
-        value_valid=torch.zeros(batch_size, n, t, f, dtype=torch.bool),
-        value_visible=torch.zeros(batch_size, n, t, f, dtype=torch.bool),
-        point_valid=torch.zeros(batch_size, n, t, dtype=torch.bool),
-        time_in_cycle=torch.zeros(batch_size, n, t, dtype=torch.float64),
-        raw_sample_index=torch.full((batch_size, n, t), -1, dtype=torch.int64),
-        cycle_id=torch.zeros(batch_size, n, dtype=torch.int64),
-        segment_bounds=torch.zeros(batch_size, n, 2, dtype=torch.int64),
-    )
+    batch = {
+        "cell_id": [s["cell_id"] for s in samples],
+        "values": torch.zeros(batch_size, n, t, f),
+        "value_valid": torch.zeros(batch_size, n, t, f, dtype=torch.bool),
+        "value_visible": torch.zeros(batch_size, n, t, f, dtype=torch.bool),
+        "point_valid": torch.zeros(batch_size, n, t, dtype=torch.bool),
+        "time_in_cycle_s": torch.zeros(batch_size, n, t, dtype=torch.float64),
+        "raw_point_position": torch.full((batch_size, n, t), -1, dtype=torch.int64),
+        "cycle_id": torch.zeros(batch_size, n, dtype=torch.int64),
+        "segment_bounds": torch.zeros(batch_size, n, 2, dtype=torch.int64),
+    }
     for b, sample in enumerate(samples):
         count = len(sample["values"])
         batch["cycle_id"][b, :count] = sample["cycle_id"]
@@ -363,8 +404,8 @@ def collate_tongji(samples):
                 "values",
                 "value_valid",
                 "value_visible",
-                "time_in_cycle",
-                "raw_sample_index",
+                "time_in_cycle_s",
+                "raw_point_position",
             ]:
                 batch[key][b, j, :length] = sample[key][j]
     batch["cycle_valid"] = batch["point_valid"].any(dim=-1)
@@ -389,8 +430,9 @@ def collate_tongji(samples):
         "future_u_valid",
         "target_cycle_id",
         "target_soh",
-        "target_valid",
+        "target_soh_valid",
     ]:
         batch[key] = torch.stack([s[key] for s in samples])
-    batch["anchor_cycle"] = torch.tensor([s["anchor_cycle"] for s in samples])
+    for key in ("last_cycle_position", "last_cycle_id"):
+        batch[key] = torch.tensor([s[key] for s in samples])
     return batch

@@ -13,7 +13,7 @@ The initial model has **37,297 trainable parameters** with the committed dataset
   (its row 0 is a trainable field-specific UNK), or an independent numerical MLP
   and UNK. Eight width-32 static tokens are included in cycle-level attention.
 - Two cycle-level Transformer blocks fuse STATE, static field tokens, and cycle
-  tokens with true cycle ID and anchor-relative position encodings. A static- and
+  tokens with true cycle ID and encodings for distance from the last cycle ID. A static- and
   history-conditioned STATE query projects to a 16-dimensional predictive state.
 - A shared residual MLP dynamics predicts one state increment per real future
   cycle, conditioned on the known protocol and static context. A shared MLP head
@@ -27,13 +27,13 @@ sample-point and cycle levels (`early`). The curriculum pilot uses `cycle`.
 ## Data and interpretation
 
 The pilot trains on `Tongji1_CY25-025_1--4` and tests on the independent cell
-`Tongji1_CY25-025_1--5`. It considers observation anchors through cycle 6.
+`Tongji1_CY25-025_1--5`. It uses the first six cycle records as candidate observation cutoffs.
 Epoch 0 uses all available observations. Epoch 1 retains half the available
 cycles and half of each selected charge segment, and keeps 90% of each point's
 valid readings rounded down. Evaluation uses a fixed view from the final stage.
 
-Validation holds out forecast anchors from the training cell. History and future
-labels can overlap across the training and validation anchors. The pilot fits
+Validation holds out forecast tasks from the training cell. History and future
+labels can overlap across the training and validation tasks. The pilot fits
 normalization from the training cell. For independent-cell validation, set
 `data.cell_ids.val` using the [configuration guide](config.md).
 

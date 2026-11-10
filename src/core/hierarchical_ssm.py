@@ -22,6 +22,13 @@ class ScalarEncoder(nn.Module):
 
 
 class HierarchicalStateSpaceModel(nn.Module):
+    feature_mean: torch.Tensor
+    feature_std: torch.Tensor
+    static_mean: torch.Tensor
+    static_std: torch.Tensor
+    condition_mean: torch.Tensor
+    condition_std: torch.Tensor
+
     def __init__(self, vocabulary_sizes, config, normalization):
         super().__init__()
         if config['static_fusion'] not in ('cycle', 'early'):
@@ -64,11 +71,15 @@ class HierarchicalStateSpaceModel(nn.Module):
         self.dynamics = nn.Sequential(
             nn.Linear(z + 2 * config['context_dim'], config['dynamics_hidden']), nn.SiLU(),
             nn.Linear(config['dynamics_hidden'], z))
-        nn.init.normal_(self.dynamics[-1].weight, std=0.001)
-        nn.init.zeros_(self.dynamics[-1].bias)
+        dynamics_output = self.dynamics[-1]
+        assert isinstance(dynamics_output, nn.Linear) and dynamics_output.bias is not None
+        nn.init.normal_(dynamics_output.weight, std=0.001)
+        nn.init.zeros_(dynamics_output.bias)
         self.head = nn.Sequential(nn.Linear(z + config['context_dim'], config['head_hidden']),
                                   nn.SiLU(), nn.Linear(config['head_hidden'], 1))
-        nn.init.constant_(self.head[-1].bias, config['initial_soh_bias'])
+        head_output = self.head[-1]
+        assert isinstance(head_output, nn.Linear) and head_output.bias is not None
+        nn.init.constant_(head_output.bias, config['initial_soh_bias'])
 
     def encode_static(self, batch):
         tokens = []
@@ -96,7 +107,7 @@ class HierarchicalStateSpaceModel(nn.Module):
         use = batch['value_valid'] & batch['value_visible'] & point_valid.unsqueeze(-1)
         features = [encoder(values[..., f], use[..., f], self.feature_mean[f], self.feature_std[f])
                     for f, encoder in enumerate(self.observation_encoders)]
-        time = torch.where(point_valid, batch['time_in_cycle'], 0).to(values.dtype)
+        time = torch.where(point_valid, batch['time_in_cycle_s'], 0).to(values.dtype)
         time = self.time_encoder((time / self.config['time_scale_s']).unsqueeze(-1))
         points = self.point_projection(torch.cat([*features, time], dim=-1))
         points = torch.where(point_valid.unsqueeze(-1), points, 0)
@@ -121,7 +132,7 @@ class HierarchicalStateSpaceModel(nn.Module):
         cycles = values.new_zeros(*cycle_valid.shape, self.d_model)
         cycles[cycle_valid] = sequence[:, 0]
         ids = torch.where(cycle_valid, batch['cycle_id'], 0).to(values.dtype)
-        ages = torch.where(cycle_valid, batch['anchor_cycle'][:, None] - batch['cycle_id'], 0).to(values.dtype)
+        ages = torch.where(cycle_valid, batch['last_cycle_id'][:, None] - batch['cycle_id'], 0).to(values.dtype)
         position = torch.stack([ids, ages], dim=-1) / self.config['cycle_scale']
         cycles = cycles + self.cycle_position(position) + self.token_types[1]
 

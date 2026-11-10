@@ -21,6 +21,7 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger, WandbLogger
 
 from src.callbacks import RunDiagnostics
+from src.data import TongjiTaskSampler
 from src.data.loading import (
     build_datasets,
     fit_normalization,
@@ -118,19 +119,20 @@ def main():
         sources = source_manifest(PROJECT_ROOT)
         write_json(
             run_dir / "provenance.json",
-            dict(
-                git_commit=git_commit,
-                source_sha256=sources,
-                torch_version=torch.__version__,
-                wandb_mode="offline",
-            ),
+            {
+                "git_commit": git_commit,
+                "source_sha256": sources,
+                "torch_version": torch.__version__,
+                "wandb_mode": "offline",
+            },
         )
         if not (run_dir / "source").exists():
             copy_source(PROJECT_ROOT, run_dir / "source", sources)
     parameter_count = sum(p.numel() for p in module.parameters())
     print("Run directory:", run_dir, flush=True)
     print("Parameters:", parameter_count, flush=True)
-    print("Anchor samples:", {k: len(v) for k, v in datasets.items()}, flush=True)
+    print("Forecast tasks:", {name: len(ds.tasks) for name, ds in datasets.items()}, flush=True)
+    print("Samples per epoch:", {name: len(ds) for name, ds in datasets.items()}, flush=True)
     checkpoint = ModelCheckpoint(
         dirpath=run_dir / "checkpoints",
         monitor="val/mse",
@@ -173,8 +175,9 @@ def main():
         k: make_loader(v, config, shuffle=(k == "train")) for k, v in datasets.items()
     }
     try:
-        train_sampler = loaders["train"].sampler
-        if args.resume:
+        if ckpt_path is not None:
+            train_sampler = loaders["train"].sampler
+            assert isinstance(train_sampler, TongjiTaskSampler)
             previous = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             # Lightning can prefetch before calling set_epoch on the resumed sampler.
             next_epoch = int(previous["epoch"]) + 1
@@ -188,12 +191,14 @@ def main():
         )
         best_name = Path(checkpoint.best_model_path).name
         best_score = checkpoint.best_model_score
-        if args.resume and best_score is None:
+        if ckpt_path is not None and best_score is None:
             # Lightning skips restoring the best score when the checkpoint directory moved.
             previous = torch.load(ckpt_path, map_location="cpu", weights_only=False)
             best = previous["callbacks"][checkpoint.state_key]
             best_name = Path(best["best_model_path"]).name
             best_score = best["best_model_score"]
+        if best_score is None:
+            raise RuntimeError("No validation checkpoint score was recorded")
         best_path = run_dir / "checkpoints" / best_name
         test_metrics = trainer.test(
             module, dataloaders=loaders["test"], ckpt_path=str(best_path)
@@ -205,16 +210,16 @@ def main():
             metrics[stage], predictions[stage] = evaluate(module, loaders[key], limit)
             npz_path = run_dir / f"{stage}_predictions.npz"
             np.savez_compressed(npz_path, **predictions[stage])
-        results = dict(
-            metrics=metrics,
-            lightning_test=test_metrics,
-            best_checkpoint=str(best_path),
-            best_val_mse=float(best_score),
-            parameter_count=parameter_count,
-            evaluation_view_seed=config["data"]["eval_seed"],
-            validation_note=splits["note"],
-            device=config["trainer"]["accelerator"],
-        )
+        results = {
+            "metrics": metrics,
+            "lightning_test": test_metrics,
+            "best_checkpoint": str(best_path),
+            "best_val_mse": float(best_score),
+            "parameter_count": parameter_count,
+            "evaluation_view_seed": config["data"]["eval_seed"],
+            "validation_note": splits["note"],
+            "device": config["trainer"]["accelerator"],
+        }
         write_json(run_dir / "metrics.json", results)
         plot_results(run_dir, predictions)
         for stage, value in metrics.items():

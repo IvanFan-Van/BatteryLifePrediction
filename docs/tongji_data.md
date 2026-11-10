@@ -12,7 +12,7 @@ uv run python -m unittest discover -s tests -v
 
 The preprocessing command reads trusted BatteryLife `.pkl` files from
 `data/raw/Tongji`. It refuses to overwrite an existing output directory; choose a
-new version directory when changing rules. Open `notebooks/Tongji.ipynb` with the
+new version directory when changing rules. Open `notebooks/analysis/Tongji.ipynb` with the
 project virtual environment and run all cells. Each run picks a random cell and
 cycle, records its seed, compares original and extracted curves, and displays
 random training views, padding, masks, future labels, and a masked MSE example.
@@ -70,18 +70,19 @@ rest schedule. BatteryLife's upstream time normalization may compress gaps;
 
 Use [the Dataset guide](dataset.md) to build `TongjiTaskDataset`, inspect masks,
 and load variable-length observations. Future labels follow real cycle IDs
-`k+1` through `k+horizon`. Missing records, invalid SOH, and out-of-range cycles
-have `target_valid=False`. Known protocol settings provide the future conditions.
-The diagnostics `raw_sample_index` and `segment_bounds` trace observations
+`last_cycle_id + 1` through `last_cycle_id + forecast_horizon_cycles`. Missing records, invalid SOH, and out-of-range cycles
+have `target_soh_valid=False`. Known protocol settings provide the future conditions.
+The sample diagnostics `raw_point_position` and `segment_bounds` trace observations
 back to the source.
 
 ## 按预测任务索引与观测课程
 
 [小规模课程配置](../configs/tongji_curriculum_pilot.yaml) 使用两块真实电芯、
 四步 SOH 标签和两个 epoch。带 `data.observation_schedule` 的训练配置使用
-`TongjiTaskDataset`。`len(dataset)` 是可用的 `(cell_id, last_observed_cycle)` 任务数。
-`dataset[i]` 固定读取 epoch 0 的视图，`dataset[i, 1]` 读取该任务在 epoch 1
-的视图。组 batch 仍使用 `collate_tongji`。
+`TongjiTaskDataset`。`len(dataset.tasks)` 是可用的 `(cell_id, last_cycle_position)`
+任务数，`len(dataset)` 是任务数乘以 `samples_per_task`。
+`dataset[i]` 固定读取 epoch 0 的第 `i` 份样本，`dataset[i, 1]` 读取
+同一个样本下标在 epoch 1 的观测。组 batch 使用 `collate_tongji`。
 
 `cycle_fraction` 和 `segment_fraction` 用 `0.5` 这类小数表示比例。循环配额向上取整，
 并始终保留最后观测循环。连续片段长度向下取整，至少保留一个点。
