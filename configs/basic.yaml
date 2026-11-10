@@ -32,24 +32,24 @@ data:
           segment_fraction: 0.5
           value_keep: 0.9
 model:
-    d_model: 32
-    state_dim: 16
-    feature_dim: 4
-    scalar_hidden: 8
-    time_dim: 8
-    heads: 2
-    feedforward_dim: 64
-    point_layers: 1
-    cycle_layers: 2
-    dropout: 0.0
-    context_dim: 16
-    dynamics_hidden: 64
-    head_hidden: 32
-    time_scale_s: 10000.0
-    cycle_scale: 100.0
-    transition_scale: 0.1
-    initial_soh_bias: 0.9
-    static_fusion: cycle
+    embedding:
+        scalar:
+            output_dim: 8
+            hidden_dim: 16
+            activation: gelu
+        categorical:
+            output_dim: 8
+        time_scale_s: 10000.0
+        cycle_distance_scale: 100.0
+    state_estimator:
+        d_model: 16
+        state_dim: 16
+        num_heads: 2
+        feedforward_dim: 64
+        field_layers: 2
+        time_layers: 2
+        cycle_layers: 2
+        dropout: 0.0
 optimizer:
     lr: 0.003
     weight_decay: 0.0001
