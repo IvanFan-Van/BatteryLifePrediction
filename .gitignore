@@ -15,6 +15,7 @@ wheels/
 # Ignore unmigrated local data and runs in older branches
 /tmp/
 /runs/
-papers/
-.cortexkit/magic-context/
+/papers/
+/.cortexkit/magic-context/
 /raw_data
+/.ruff_cache
