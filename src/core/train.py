@@ -1,6 +1,6 @@
-"""Train the Tongji hierarchical state-space demo with offline experiment logs.
+"""Train the Tongji state-space model with offline experiment logs.
 
-uv run python -m src.core.train --config configs/tongji_curriculum_pilot.yaml
+uv run --locked python -m src.core.train --config configs/basic.yaml
 """
 
 import argparse
@@ -22,12 +22,7 @@ from lightning.pytorch.loggers import CSVLogger, TensorBoardLogger, WandbLogger
 
 from src.callbacks import RunDiagnostics
 from src.data import TongjiTaskSampler
-from src.data.loading import (
-    build_datasets,
-    fit_normalization,
-    make_loader,
-    vocabulary_sizes,
-)
+from src.data.loading import build_datasets, make_loader
 from src.utils.files import read_json, read_yaml, write_json
 from src.utils.paths import (
     CONFIGS_DIR,
@@ -45,7 +40,7 @@ from .module import BatteryTrajectoryModule
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--config", type=Path, default=CONFIGS_DIR / "tongji_curriculum_pilot.yaml"
+        "--config", type=Path, default=CONFIGS_DIR / "basic.yaml"
     )
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument(
@@ -97,15 +92,7 @@ def main():
     datasets, splits = build_datasets(config, saved_splits)
     write_json(run_dir / "splits.json", splits)
     max_epochs = datasets["train"].max_epochs
-    if args.resume:
-        normalization = read_json(run_dir / "normalization.json")
-    else:
-        normalization = fit_normalization(
-            config["data"]["root"], splits["train_cells"]
-        )
-        write_json(run_dir / "normalization.json", normalization)
-    sizes = vocabulary_sizes(config["data"]["root"])
-    module = BatteryTrajectoryModule(config, sizes, normalization)
+    module = BatteryTrajectoryModule(config)
     if not args.resume:
         try:
             git_commit = subprocess.check_output(

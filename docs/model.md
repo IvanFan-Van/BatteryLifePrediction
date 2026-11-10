@@ -65,6 +65,13 @@
   - `static` 为 `(B, 8D)`，按字段顺序展开八个投影后的静态 token。
   - `future_conditions` 为 `(B, H, 4D)`，逐步展开四个投影后的工况 token。历史和未来共用工况字段编码器。
 
+- **`BatteryTrajectoryModel` 用共享的三层 MLP 逐轮推演状态，并输出 `(B, H)` 的 SOH。**
+  - **Dynamics 每轮预测一个状态增量。** 将当前状态 `(B, state_dim)`、该步工况 `(B, 4D)` 和静态向量 `(B, 8D)` 拼接，经过三层线性变换，得到 `(B, state_dim)` 的增量。增量与当前状态相加，得到下一轮状态。
+    - `model.dynamics.hidden_dims: [64, 64]` 设置两个隐层宽度。`activation: gelu` 设置两个隐层后的激活函数，可选 `gelu`、`relu`、`silu`。
+  - **SOH 预测头将每轮更新后的状态读出为一个标量。** 将下一轮状态和静态向量拼接，经三层线性变换得到 `(B, 1)`，压缩并堆叠为 `(B, H)`。
+    - `model.soh_head.hidden_dims: [32, 16]` 设置两个隐层宽度。`activation: gelu` 可使用相同的激活函数选项，最后一层直接输出 SOH。
+  - **训练按 `target_soh_valid` 屏蔽无效标签。** 先对每条轨迹的有效预测步求平均 MSE，再对 batch 求平均。每个未来步都递推状态，掩码只决定该步是否提供监督。
+
 - **所有连续字段各自通过一个两层 MLP，输出长度由 `model.embedding.scalar` 统一控制。**
   - `output_dim: 8` 是每个标量输出的向量长度，记为 `D_num`。改变它会改变观测、静态数值、工况和位置向量的宽度。
   - `hidden_dim: 16` 是 MLP 隐层的宽度。默认结构为 `Linear(1, 16) → GELU → Linear(16, 8)`。

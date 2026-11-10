@@ -50,6 +50,12 @@ model:
         time_layers: 2
         cycle_layers: 2
         dropout: 0.0
+    dynamics:
+        hidden_dims: [64, 64]
+        activation: gelu
+    soh_head:
+        hidden_dims: [32, 16]
+        activation: gelu
 optimizer:
     lr: 0.003
     weight_decay: 0.0001

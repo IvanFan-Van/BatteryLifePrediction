@@ -1,27 +1,25 @@
-"""Lightning wrapper; ordinary PyTorch model lives in hierarchical_ssm.py."""
+"""Lightning training and masked errors for Tongji SOH trajectories."""
+
 import lightning as L
 import torch
 
-from .hierarchical_ssm import HierarchicalStateSpaceModel
+from .trajectory import BatteryTrajectoryModel
 
 
 def trajectory_errors(prediction, target, valid):
-    """Per-sample normalization prevents longer recorded tails dominating loss."""
+    """Compute per-sample MSE and MAE over available future labels."""
     count = valid.sum(dim=-1)
     if not (count > 0).all():
-        raise ValueError('Each trajectory needs at least one valid target')
-    safe_target = torch.where(valid, target, 0)
-    error = prediction - safe_target
-    square = torch.where(valid, error.square(), 0).sum(dim=-1) / count
-    absolute = torch.where(valid, error.abs(), 0).sum(dim=-1) / count
-    return square, absolute
+        raise ValueError("Each trajectory needs at least one valid target")
+    error = torch.where(valid, prediction - target, 0)
+    return error.square().sum(dim=-1) / count, error.abs().sum(dim=-1) / count
 
 
 class BatteryTrajectoryModule(L.LightningModule):
-    def __init__(self, config, vocabulary_sizes, normalization):
+    def __init__(self, config):
         super().__init__()
         self.save_hyperparameters()
-        self.model = HierarchicalStateSpaceModel(vocabulary_sizes, config['model'], normalization)
+        self.model = BatteryTrajectoryModel(config)
 
     def forward(self, batch):
         return self.model(batch)
@@ -29,23 +27,38 @@ class BatteryTrajectoryModule(L.LightningModule):
     def shared_step(self, batch, stage):
         prediction = self(batch)
         if not torch.isfinite(prediction).all():
-            raise FloatingPointError('Nonfinite trajectory prediction')
-        mse, mae = trajectory_errors(prediction, batch['target_soh'], batch['target_soh_valid'])
-        self.log(f'{stage}/mse', mse.mean(), on_step=False, on_epoch=True,
-                 batch_size=len(prediction), prog_bar=True)
-        self.log(f'{stage}/mae', mae.mean(), on_step=False, on_epoch=True,
-                 batch_size=len(prediction))
-        return mse.mean()
+            raise FloatingPointError("Nonfinite trajectory prediction")
+        mse, mae = trajectory_errors(
+            prediction, batch["target_soh"], batch["target_soh_valid"]
+        )
+        loss = mse.mean()
+        self.log(
+            f"{stage}/mse",
+            loss,
+            batch_size=len(prediction),
+            on_epoch=True,
+            on_step=False,
+        )
+        self.log(
+            f"{stage}/mae",
+            mae.mean(),
+            batch_size=len(prediction),
+            on_epoch=True,
+            on_step=False,
+        )
+        return loss
 
     def training_step(self, batch, batch_idx):
-        return self.shared_step(batch, 'train')
+        return self.shared_step(batch, "train")
 
     def validation_step(self, batch, batch_idx):
-        self.shared_step(batch, 'val')
+        return self.shared_step(batch, "val")
 
     def test_step(self, batch, batch_idx):
-        self.shared_step(batch, 'test')
+        return self.shared_step(batch, "test")
 
     def configure_optimizers(self):
-        cfg = self.hparams['config']['optimizer']
-        return torch.optim.AdamW(self.parameters(), lr=cfg['lr'], weight_decay=cfg['weight_decay'])
+        config = self.hparams["config"]["optimizer"]
+        return torch.optim.AdamW(
+            self.parameters(), lr=config["lr"], weight_decay=config["weight_decay"]
+        )
