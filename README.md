@@ -1,44 +1,59 @@
 # Battery life prediction
 
 The project trains a hierarchical state-space model to forecast Tongji SOH
-trajectories from sampled charge segments and cell metadata.
+trajectories from sampled charge segments, cell metadata, and operating conditions.
+Run the following commands from the repository root.
 
-| Directory | Contents |
-| --- | --- |
-| configs/ | YAML files for Tongji curriculum training |
-| data/raw/ | Original datasets, including BatteryLife Tongji pickles in Tongji/ |
-| data/processed/ | Prepared datasets, including tongji_v1/ |
-| docs/ | Pueue and Tongji workflow guides |
-| notebooks/ | Jupyter notebooks for inspecting processed cells and batches |
-| outputs/ | Experiment reports, logs, predictions, and checkpoints |
-| scripts/ | Data preparation and experiment queue entry points |
-| src/ | Data pipeline, Lightning callbacks, utilities, and training code |
-| tests/ | Unit tests for processing, sampling, and training |
+## 1. Set up the environment
 
-From the project root:
+With `uv` installed, sync the dependencies from `uv.lock`. The project requires
+Python 3.12 or later.
 
-~~~bash
+```bash
 uv sync --locked
-uv run --locked python -m unittest discover -s tests -v
-uv run --locked python scripts/queue_tongji.py --config configs/tongji_curriculum_pilot.yaml
-~~~
+```
 
-The last command queues the limited-batch curriculum pilot in the default Pueue
-daemon and prints its task ID and output directory. The same training entry
-point is available as `python -m src.core.train`. W&B logs are offline.
+## 2. Preprocess the Tongji data
 
-If the processed Tongji dataset does not yet exist, generate it from
-`data/raw/Tongji` with `uv run --locked python scripts/preprocess_tongji.py`.
-Preprocessing refuses to overwrite an existing destination. Use
-[the analysis notebook](notebooks/analysis/Tongji.ipynb) to inspect cells and
-[the Dataset guide](docs/dataset.md) for sampling and DataLoader examples.
+Place the trusted BatteryLife Tongji `.pkl` files directly in
+`data/raw/Tongji/` and run the preprocessing command.
 
-On an existing Linux clone where `raw_data` is a symlink, move the symlink
-itself to `data/raw` once the destination is free. Its target directory
-stays in place. If the link uses a relative target, recreate it relative to
-`data/` and verify that it resolves to the original dataset directory.
+```bash
+uv run --locked python scripts/preprocess_tongji.py --raw-dir data/raw/Tongji --output data/processed/tongji_v1
+```
 
-[Pueue guide](docs/pueue_manual.md) ·
-[Data contract](docs/tongji_data.md) ·
-[Curriculum training](docs/tongji_attention_smoke.md) ·
-[Configuration template](docs/config.md)
+The command reads the raw files and writes a separate processed dataset.
+The output directory must be new. If an existing dataset has
+`"complete": true` in `manifest.json`, you can reuse it. To preprocess again,
+choose a new output directory and point `data.root` in the training YAML at it.
+
+## 3. Train the model
+
+`configs/basic.yaml` is a limited-batch CPU example. It reads
+`data/processed/tongji_v1` and specifies the training and test cell IDs under
+`data.cell_ids`. If you prepared a subset of Tongji, use IDs listed in its
+`manifest.json` and keep the training and test cells disjoint.
+
+For Bash on Linux or macOS, use the following command.
+
+```bash
+CUDA_VISIBLE_DEVICES=-1 uv run --locked python -m src.core.train --config configs/basic.yaml
+```
+
+For Windows PowerShell, set the environment variable on a separate line.
+
+```powershell
+$env:CUDA_VISIBLE_DEVICES = '-1'
+uv run --locked python -m src.core.train --config configs/basic.yaml
+```
+
+The trainer prints the run directory under `outputs/`. It stores the
+effective configuration, data split, checkpoints, metrics, and predictions.
+W&B logs are stored offline.
+
+Submit long-running experiments through Pueue using a configuration snapshot
+and an explicit `CUDA_VISIBLE_DEVICES` value. On `farady`, use only physical
+GPU 2 or 3. The repository instructions include the submission procedure.
+[Repository instructions](AGENTS.md) · [Pueue guide](docs/pueue_manual.md)
+
+[Dataset guide](docs/dataset.md) · [Model architecture and configuration](docs/model.md)
