@@ -3,6 +3,7 @@ experiment:
     group: tongji-attention-single-cell
     name: tongji-observation-curriculum-pilot
 seed: 42
+
 data:
     # 数据加载与切分的通用参数。
     batch_size: 2
@@ -31,6 +32,7 @@ data:
           cycle_fraction: 0.5
           segment_fraction: 0.5
           value_keep: 0.9
+
 model:
     embedding:
         scalar:
@@ -56,9 +58,11 @@ model:
     soh_head:
         hidden_dims: [32, 16]
         activation: gelu
+
 optimizer:
     lr: 0.003
     weight_decay: 0.0001
+
 trainer:
     accelerator: cpu
     cpu_threads: 4

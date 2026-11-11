@@ -99,8 +99,11 @@ class TongjiTaskTests(unittest.TestCase):
             with self.subTest(keep=keep):
                 config["data"]["observation_schedule"][0]["value_keep"] = keep
                 schedule = parse_schedule(config, feature_count=6)
-                visible = sample_visible(channels, schedule.for_epoch(0).value_keep,
-                                         np.random.default_rng(42))
+                visible = sample_visible(
+                    channels,
+                    schedule.for_epoch(0).value_keep,
+                    np.random.default_rng(42),
+                )
                 np.testing.assert_array_equal(visible.sum(axis=1), [expected, expected])
 
         for invalid in (0, 0.0, 7, 4.0, True, float("nan"), "0.9", "90.0%", "101%"):
@@ -122,7 +125,9 @@ class TongjiTaskTests(unittest.TestCase):
                     parse_schedule(invalid_config, feature_count=5)
 
         channels = np.ones((1, 100), dtype=bool)
-        self.assertEqual(sample_visible(channels, 0.29, np.random.default_rng(42)).sum(), 29)
+        self.assertEqual(
+            sample_visible(channels, 0.29, np.random.default_rng(42)).sum(), 29
+        )
 
         config["data"]["observation_schedule"][1]["start_epoch"] = 0
         with self.assertRaises(ValueError):
@@ -170,7 +175,9 @@ class TongjiTaskTests(unittest.TestCase):
                 self.assertEqual(sparse["cycle_id"][-1].item(), 6)
                 self.assertEqual(len(sparse["values"][-1]), 29)
                 self.assertEqual(sparse["target_cycle_id"].tolist(), [7, 8, 9])
-                self.assertEqual(sparse["target_soh_valid"].tolist(), [False, False, True])
+                self.assertEqual(
+                    sparse["target_soh_valid"].tolist(), [False, False, True]
+                )
                 for field in ("target_cycle_id", "target_soh", "target_soh_valid"):
                     torch.testing.assert_close(full[field], sparse[field])
                 for raw, exists, visible in zip(
@@ -230,24 +237,34 @@ class TongjiTaskTests(unittest.TestCase):
             )
             dataset = TongjiTaskDataset.from_config(config)
             try:
-                self.assertEqual(dataset.tasks, (("A", 1), ("A", 3), ("B", 1), ("B", 3)))
+                self.assertEqual(
+                    dataset.tasks, (("A", 1), ("A", 3), ("B", 1), ("B", 3))
+                )
                 self.assertEqual(dataset.cycle_positions("A").tolist(), [1, 3])
                 self.assertEqual(len(dataset), 12)
                 self.assertEqual(dataset[3, 1]["last_cycle_position"], 3)
                 self.assertEqual(dataset[3, 1]["last_cycle_id"], 5)
                 self.assertEqual(dataset[3, 1]["target_cycle_id"].tolist(), [6, 7, 8])
-                self.assertEqual(dataset[3, 1]["target_soh_valid"].tolist(), [True, False, False])
+                self.assertEqual(
+                    dataset[3, 1]["target_soh_valid"].tolist(), [True, False, False]
+                )
                 for position in (4, 5):
                     torch.testing.assert_close(
                         dataset[3, 1]["target_soh"], dataset[position, 1]["target_soh"]
                     )
                 self.assertGreater(
-                    len({tuple(dataset[position, 1]["segment_bounds"][-1].tolist())
-                         for position in (3, 4, 5)}),
+                    len(
+                        {
+                            tuple(dataset[position, 1]["segment_bounds"][-1].tolist())
+                            for position in (3, 4, 5)
+                        }
+                    ),
                     1,
                 )
                 for field in ("segment_bounds", "value_visible"):
-                    torch.testing.assert_close(dataset[4, 1][field], dataset[4, 1][field])
+                    torch.testing.assert_close(
+                        dataset[4, 1][field], dataset[4, 1][field]
+                    )
                 with self.assertRaises(IndexError):
                     dataset[len(dataset)]
 
@@ -278,7 +295,9 @@ class TongjiTaskTests(unittest.TestCase):
             write_fixture(root, ["A", "B", "C", "D", "E"])
             config = yaml.safe_load(CONFIG)
             partitions = {"train": ["A", "B"], "val": ["C"], "test": ["D", "E"]}
-            config["data"].update(root=str(root), cell_ids=partitions, samples_per_task=3)
+            config["data"].update(
+                root=str(root), cell_ids=partitions, samples_per_task=3
+            )
 
             for independent_val in (True, False):
                 with self.subTest(independent_val=independent_val):
@@ -301,7 +320,9 @@ class TongjiTaskTests(unittest.TestCase):
                         self.assertEqual(len(train), len(train.tasks) * 3)
                         self.assertEqual(datasets["train_eval"].tasks, train.tasks)
                         for name in ("train_eval", "val", "test"):
-                            self.assertEqual(len(datasets[name]), len(datasets[name].tasks))
+                            self.assertEqual(
+                                len(datasets[name]), len(datasets[name].tasks)
+                            )
                         self.assertFalse(
                             set(datasets["train"].tasks) & set(datasets["val"].tasks)
                         )

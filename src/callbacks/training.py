@@ -1,4 +1,5 @@
 """Lightning callbacks for curriculum training diagnostics."""
+
 import json
 from pathlib import Path
 
@@ -12,8 +13,8 @@ class RunDiagnostics(Callback):
         self.recorded = False
 
     def on_after_backward(self, trainer, pl_module):
-        norms = dict(encoder=0.0, dynamics=0.0, head=0.0)
-        for name, parameter in pl_module.model.named_parameters():
+        norms = {"encoder": 0.0, "dynamics": 0.0, "head": 0.0}
+        for name, parameter in pl_module.model.named_parameters():  # type: ignore
             if parameter.grad is None:
                 continue
             if not torch.isfinite(parameter.grad).all():

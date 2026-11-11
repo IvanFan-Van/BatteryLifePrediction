@@ -82,15 +82,21 @@ class ObservationSchedule:
             keep = item["value_keep"]
             if type(keep) is int:
                 if not 1 <= keep <= feature_count:
-                    raise ValueError(f"value_keep must be between 1 and {feature_count}")
+                    raise ValueError(
+                        f"value_keep must be between 1 and {feature_count}"
+                    )
             else:
                 keep = _read_fraction(keep, "value_keep")
 
             phases.append(
                 ObservationPhase(
                     start_epoch=start,
-                    cycle_fraction=_read_fraction(item["cycle_fraction"], "cycle_fraction"),
-                    segment_fraction=_read_fraction(item["segment_fraction"], "segment_fraction"),
+                    cycle_fraction=_read_fraction(
+                        item["cycle_fraction"], "cycle_fraction"
+                    ),
+                    segment_fraction=_read_fraction(
+                        item["segment_fraction"], "segment_fraction"
+                    ),
                     value_keep=keep,
                 )
             )
@@ -103,7 +109,9 @@ class ObservationSchedule:
     def for_epoch(self, epoch):
         if type(epoch) is not int or not 0 <= epoch < self.max_epochs:
             raise ValueError(f"Epoch out of range: {epoch}")
-        return next(phase for phase in reversed(self.phases) if phase.start_epoch <= epoch)
+        return next(
+            phase for phase in reversed(self.phases) if phase.start_epoch <= epoch
+        )
 
 
 def sample_visible(valid, keep, rng):
@@ -219,7 +227,9 @@ class TongjiTaskDataset(Dataset):
 
             candidate_ids = cycle_ids[cycle_positions - 1]
             valid_target_ids = cycle_ids[cell["soh_valid"]]
-            target_starts = np.searchsorted(valid_target_ids, candidate_ids, side="right")
+            target_starts = np.searchsorted(
+                valid_target_ids, candidate_ids, side="right"
+            )
             target_ends = np.searchsorted(
                 valid_target_ids, candidate_ids + forecast_horizon_cycles, side="right"
             )
@@ -227,7 +237,9 @@ class TongjiTaskDataset(Dataset):
             if cycle_positions_by_cell is not None:
                 requested = set(cycle_positions_by_cell[cell_id])
                 if not requested <= set(eligible):
-                    raise ValueError(f"{cell_id}: requested cycle positions are not eligible")
+                    raise ValueError(
+                        f"{cell_id}: requested cycle positions are not eligible"
+                    )
                 eligible = [position for position in eligible if position in requested]
             if not eligible:
                 raise ValueError(f"{cell_id}: no eligible forecasting tasks")
@@ -321,10 +333,12 @@ class TongjiTaskDataset(Dataset):
         target_ids = last_cycle_id + np.arange(
             1, self.forecast_horizon_cycles + 1, dtype=np.int64
         )
-        target_rows = np.searchsorted(cycle_ids, target_ids).clip(max=len(cycle_ids) - 1)
-        target_soh_valid = (
-            (cycle_ids[target_rows] == target_ids) & cell["soh_valid"][target_rows]
+        target_rows = np.searchsorted(cycle_ids, target_ids).clip(
+            max=len(cycle_ids) - 1
         )
+        target_soh_valid = (cycle_ids[target_rows] == target_ids) & cell["soh_valid"][
+            target_rows
+        ]
         history_ids = np.arange(cycle_ids[rows[0]], last_cycle_id, dtype=np.int64)
         u = cell["conditions"][last_cycle_row]
         u_valid = cell["conditions_valid"][last_cycle_row]

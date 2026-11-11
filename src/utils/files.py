@@ -1,4 +1,5 @@
 """Read configuration and write experiment metadata."""
+
 import json
 from pathlib import Path
 

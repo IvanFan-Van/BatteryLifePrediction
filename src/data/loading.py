@@ -183,6 +183,6 @@ def make_loader(dataset, config, shuffle=False):
 
 def vocabulary_sizes(root):
     root = processed_data_path(root)
-    mapping = read_json(root / 'category_mapping.json')
-    schema = read_json(root / 'schema.json')
-    return [len(mapping[field]) for field in schema['static_categorical']]
+    mapping = read_json(root / "category_mapping.json")
+    schema = read_json(root / "schema.json")
+    return [len(mapping[field]) for field in schema["static_categorical"]]
