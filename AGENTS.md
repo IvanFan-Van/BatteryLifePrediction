@@ -94,30 +94,32 @@ Commit 应当尽量保持原子性。
 - 不在实验运行期间修改该实验实际读取的配置快照。
 
 
-当前服务器有四张 NVIDIA RTX 4090。
+farady（Linux）服务器有四张 NVIDIA RTX 4090。以下 GPU 编号限制仅适用于 farady。
 
-**本项目只允许使用物理 GPU 2 和 GPU 3（最后两张）。**
+**在 farady 上只允许使用物理 GPU 2 和 GPU 3（最后两张）。**
 
-严格禁止使用物理 GPU 0 和 GPU 1，除非用户明确修改此规则。
+farady 上严格禁止使用物理 GPU 0 和 GPU 1，除非用户明确修改此规则。
+
+Windows 本地开发环境允许使用本机所有 GPU，包括 GPU 0。可以在显存余量至少 20% 的前提下并行运行实验。
 
 启动训练时必须显式设置 `CUDA_VISIBLE_DEVICES`。
 
 使用物理 GPU 2：
 
 ```bash
-CUDA_VISIBLE_DEVICES=2 uv run --locked python train.py
+CUDA_VISIBLE_DEVICES=2 uv run --locked python -m src.core.train
 ```
 
 使用物理 GPU 3：
 
 ```bash
-CUDA_VISIBLE_DEVICES=3 uv run --locked python train.py
+CUDA_VISIBLE_DEVICES=3 uv run --locked python -m src.core.train
 ```
 
 同时使用两张 GPU：
 
 ```bash
-CUDA_VISIBLE_DEVICES=2,3 uv run --locked python train.py
+CUDA_VISIBLE_DEVICES=2,3 uv run --locked python -m src.core.train
 ```
 
 注意：`CUDA_VISIBLE_DEVICES` 会重新映射进程内的 CUDA 设备编号。
@@ -156,10 +158,10 @@ Pueue 不会自动保存任务添加时的配置文件内容。
 
 ```bash
 # 1. 创建临时目录
-mkdir -p ./tmp/pueue-config
+mkdir -p ./outputs/_scratch/pueue-config
 
 # 2. 生成唯一的配置文件
-snapshot=$(mktemp "$PWD/tmp/pueue-config/config.<run_id>.yaml")
+snapshot=$(mktemp "$PWD/outputs/_scratch/pueue-config/config.<run_id>.yaml")
 
 # 3. 保存当前配置
 cp -- config.yaml "$snapshot"
@@ -167,7 +169,7 @@ cp -- config.yaml "$snapshot"
 # 4. 提交任务
 if PUEUE_CONFIG_SNAPSHOT="$snapshot" \
    pueue add -g gpu2 --label "baseline-gpu2" -- \
-   'CUDA_VISIBLE_DEVICES=2 uv run --locked python train.py --config "$PUEUE_CONFIG_SNAPSHOT"; rc=$?; rm -f -- "$PUEUE_CONFIG_SNAPSHOT"; exit $rc'
+   'CUDA_VISIBLE_DEVICES=2 uv run --locked python -m src.core.train --config "$PUEUE_CONFIG_SNAPSHOT"; rc=$?; rm -f -- "$PUEUE_CONFIG_SNAPSHOT"; exit $rc'
 then
     echo "Experiment queued successfully."
 else
@@ -216,17 +218,17 @@ pueue follow <task_id>
 `pueue follow` 会持续占用当前终端，可以通过 `Ctrl+C` 退出跟踪。正常情况下不会终止后台训练任务。
 
 更多 Pueue 命令参考：
-[本地 Pueue 使用指南](docs/pueue_manual)
+[本地 Pueue 使用指南](docs/pueue_manual.md)
 
 
-所有实验使用的原始数据均存放于项目的 `raw_data` 目录。
+所有实验使用的原始数据均存放于项目的 `data/raw` 目录。
 
 **原始数据默认只读。**
 
-- 未经用户明确许可，不得修改、覆盖或删除 `raw_data` 中的数据。
+- 未经用户明确许可，不得修改、覆盖或删除 `data/raw` 中的数据。
 - 如果确实需要改变原始数据，应先告知用户并获得允许。
 - 获得允许后，应创建独立副本，并在副本上进行操作。
 - 数据预处理的输出应与原始数据分离。
 - 不得无意覆盖已有预处理结果。
 
-同样应保护 `runs/`、日志和 checkpoint 等实验产物。未经用户许可，不执行破坏性批量清理。
+同样应保护 `outputs/`、日志和 checkpoint 等实验产物。未经用户许可，不执行破坏性批量清理。

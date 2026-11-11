@@ -31,9 +31,11 @@ torchvision = [
 
 [dependency-groups]
 dev = [
-    "ipykernel>=7.4.0",
+    "ipykernel==6.31.0",
     "ipywidgets>=8.1.9",
     "matplotlib>=3.11.2",
     "nbclient>=0.11.0",
     "nbformat>=5.11.1",
+    "pyright>=1.1.414",
+    "ruff>=0.17.4",
 ]

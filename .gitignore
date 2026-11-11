@@ -9,9 +9,13 @@ wheels/
 # Virtual environments
 .venv
 .vscode/
-tmp/
-runs/
-data
-papers/
-.cortexkit/magic-context/
-raw_data/
+/outputs/
+/data/
+
+# Ignore unmigrated local data and runs in older branches
+/tmp/
+/runs/
+/papers/
+/.cortexkit/magic-context/
+/raw_data
+/.ruff_cache
